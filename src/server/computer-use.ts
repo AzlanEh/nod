@@ -218,7 +218,7 @@ const viewOnlyApps: Array<[RegExp, string]> = [
   ],
 ];
 
-type Window = { id: string; title: string };
+type Window = { id: string; title: string; hidden?: boolean };
 type App = { pid: number; bundle: string; program?: string; name: string; windows?: Window[] };
 type Identity = { bundle: string; program?: string; name: string; pid?: number };
 type Node = {
@@ -269,6 +269,10 @@ export function computerAppRule(bundleId: string, keptOut: string[] = []) {
   for (const [pattern, why] of viewOnlyApps)
     if (matches(pattern)) return { kind: 'view' as const, why };
   return { kind: 'use' as const };
+}
+
+function shownWindow(app: App) {
+  return app.windows?.find((window) => !window.hidden) ?? app.windows?.[0];
 }
 
 function secureFocused(node: Node | undefined): boolean {
@@ -479,12 +483,11 @@ export function createComputerUse(
       },
       signal,
     );
-    const text = JSON.stringify(
-      focus ? { tree: result.tree, focused: result.focused } : result.tree,
-    );
+    const context = typeof result.context === 'string' ? result.context : '';
+    const text =
+      focus && context ? `${context}\n\nFocused: ${JSON.stringify(result.focused)}` : context;
     if (
       !text ||
-      !result.tree ||
       typeof result.state !== 'string' ||
       !/^[a-f0-9]{64}$/.test(result.state) ||
       (focus && (typeof result.focus !== 'string' || !/^[a-f0-9]{64}$/.test(result.focus))) ||
@@ -631,7 +634,7 @@ export function createComputerUse(
       const found = targetOf(root, input.ref!, keptOut);
       const node = await live(found, input.ref!, signal);
       const app = await appFor(root, found.pid!, keptOut, true, signal);
-      const chosen = found.windowId ?? app.windows?.[0]?.id;
+      const chosen = found.menu ? undefined : (found.windowId ?? shownWindow(app)?.id);
       if (!chosen && !found.menu)
         throw new IntegrationError(`${found.app} has no open window.`, 409);
       return {
@@ -670,7 +673,7 @@ export function createComputerUse(
     if (input.menu) return { ...base, menu: true, windowTitle: 'menu bar' };
     const chosen = input.window
       ? app.windows?.find((item) => item.id === input.window)
-      : app.windows?.[0];
+      : shownWindow(app);
     if (!chosen)
       throw new IntegrationError(
         input.window
