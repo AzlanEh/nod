@@ -10065,6 +10065,38 @@ test('computer use checks a large window only around the control it acts on', as
   await assert.rejects(inspect(send), /could not tell which part/);
 });
 
+test('computer use treats a list whose cells all report focus as one focused control', async (t) => {
+  const desktop = await fakeDesktop(t, {
+    snapshot: {
+      ok: true,
+      data: {
+        complete: true,
+        tree: {
+          role: 'window',
+          name: 'Inbox',
+          children: [
+            { role: 'textfield', name: 'To', value: '', states: ['focused'] },
+            {
+              role: 'table',
+              name: 'Messages',
+              children: Array.from({ length: 300 }, (_, index) => ({
+                role: 'row',
+                children: [{ role: 'cell', name: `Row ${index}`, states: ['focused'] }],
+              })),
+            },
+          ],
+        },
+      },
+    },
+  });
+  const inspected = await desktop.helper.request({ op: 'inspect', app: 'Mail', window: 'w-1' });
+  assert.deepEqual(
+    inspected.focused.map((item) => item.role),
+    ['textfield', 'table'],
+  );
+  assert.doesNotMatch(inspected.context, /Row 1/);
+});
+
 test('computer use keeps a window binding when another control turns on as the app comes forward', async (t) => {
   const compose = (tools, send, to = 'ana@example.test') => ({
     ok: true,

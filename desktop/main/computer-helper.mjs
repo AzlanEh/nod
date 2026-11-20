@@ -75,6 +75,16 @@ const refusedCategories = /(^|;)(Settings|System|FileManager|Security)(;|$)/;
 const isFocused = (node) =>
   node.states?.includes('focused') && !['window', 'dialog'].includes(node.role);
 
+function focusClaims(tree) {
+  const claims = new Set();
+  const visit = (node, list) => {
+    if (isFocused(node)) claims.add(list ?? node);
+    node.children?.forEach((child) => visit(child, listRoles.has(node.role) ? node : list));
+  };
+  visit(tree);
+  return claims;
+}
+
 function secure(node) {
   return node.states?.includes('secure') || /secure|password/i.test(node.role ?? '');
 }
@@ -125,7 +135,7 @@ function inspectResult(data, menu = false, target) {
         Boolean(
           node.states?.includes('selected') ||
           isTarget(node) ||
-          isFocused(node) ||
+          claims.has(node) ||
           node.children?.some(relevant),
         ),
       );
@@ -137,7 +147,7 @@ function inspectResult(data, menu = false, target) {
   let focusNode;
   const focused = [];
   const focus = (node, path = []) => {
-    if (isFocused(node))
+    if (claims.has(node))
       focused.push({ path, role: node.role ?? '', name: secure(node) ? '' : (node.name ?? '') });
     if (secure(node)) return;
     node.children?.forEach((child, index) => focus(child, [...path, index]));
@@ -165,7 +175,7 @@ function inspectResult(data, menu = false, target) {
       children: kept.map(walk).filter((child) => !emptyGroup(child)),
     };
     if (isTarget(node)) targetNode ??= read;
-    if (isFocused(node)) focusNode ??= read;
+    if (claims.has(node)) focusNode ??= read;
     return read;
   };
   const source = menu
@@ -176,6 +186,7 @@ function inspectResult(data, menu = false, target) {
           data.tree.children_count == null ? undefined : Math.max(0, data.tree.children_count - 2),
       }
     : data.tree;
+  const claims = focusClaims(source);
   const tree = walk(source);
   focus(source);
   if (target && !found)
