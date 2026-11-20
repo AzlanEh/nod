@@ -514,23 +514,9 @@ export function createComputerUse(
     };
   }
 
-  async function unchangedWindow(prepared: ComputerPrepared, signal?: AbortSignal) {
-    const binding = prepared.windowBinding;
-    if (!binding)
+  function checkedWindow(prepared: ComputerPrepared) {
+    if (!prepared.windowBinding)
       throw new IntegrationError('This step has no checked window. Take a new snapshot.', 409);
-    const current = await windowContext(
-      prepared.app!.name,
-      binding.window,
-      signal,
-      Boolean(binding.focus),
-      Boolean(binding.menu),
-      binding.target,
-    );
-    if (
-      current.windowBinding.state !== binding.state ||
-      current.windowBinding.focus !== binding.focus
-    )
-      throw new IntegrationError('That window changed since this step was checked.', 409);
   }
 
   async function windowsOf(app: App, signal?: AbortSignal): Promise<App> {
@@ -882,7 +868,7 @@ export function createComputerUse(
         throw new IntegrationError('That control changed since this step was checked.', 409);
       unique(await running(signal), found.app);
       await live(found, String(prepared.ref), signal);
-      if (needsCheck(action)) await unchangedWindow(prepared, signal);
+      if (needsCheck(action)) checkedWindow(prepared);
       return async () => {
         const result = (await ask(
           {
@@ -921,7 +907,7 @@ export function createComputerUse(
     const scope = { app: app.name, window: prepared.window };
     if (action === 'COMPUTER_SCREENSHOT')
       return () => ask({ op: 'screenshot', ...scope, noSecureFocus: true }, signal);
-    await unchangedWindow(prepared, signal);
+    checkedWindow(prepared);
     return async () => {
       await ask(
         {

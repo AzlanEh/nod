@@ -2038,10 +2038,18 @@ test('computer use refuses blocked apps, keeps browsers view-only and acts only 
               ...menuBar.children.flatMap((node) => node.children),
             ].find((node) => node.ref_id === request.ref),
           };
-        if (request.op === 'inspect') {
-          const tree = request.menu
+        const currentTree = () =>
+          request.menu
             ? { ...menuBar, children: menuBar.children.slice(2) }
             : { ...window, children: [...window.children, ...findings] };
+        if (
+          request.expected &&
+          createHash('sha256').update(JSON.stringify(currentTree())).digest('hex') !==
+            request.expected
+        )
+          throw new Error('STALE_REF: That window changed since this step was checked.');
+        if (request.op === 'inspect') {
+          const tree = currentTree();
           return {
             tree,
             context: JSON.stringify(tree),
