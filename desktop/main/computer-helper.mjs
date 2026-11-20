@@ -28,8 +28,8 @@ const unready = (error) =>
   /has not published its accessibility tree|tree is still thin/i.test(error.message);
 const needsFocus = (error) =>
   focusRefusal.test(error.message) ||
-  (error.delivery === 'not_delivered' && error.kind === 'actionability_timeout') ||
-  unready(error);
+  (error.delivery === 'not_delivered' &&
+    (error.kind === 'actionability_timeout' || unready(error)));
 const activation = ['focused', 'hovered', 'disabled'];
 const pasteRoles = new Set(['scrollarea', 'webarea', 'group', 'document']);
 const appSteps = new Set([
@@ -82,8 +82,9 @@ const isFocused = (node) =>
 function focusClaims(tree) {
   const claims = new Set();
   const visit = (node, list) => {
-    if (isFocused(node)) claims.add(list ?? node);
-    node.children?.forEach((child) => visit(child, listRoles.has(node.role) ? node : list));
+    const own = listRoles.has(node.role) ? node : list;
+    if (isFocused(node)) claims.add(own ?? node);
+    node.children?.forEach((child) => visit(child, own));
   };
   visit(tree);
   return claims;
@@ -149,7 +150,7 @@ function inspectResult(data, menu = false, target) {
   let found = 0;
   let targetNode;
   let focusNode;
-  let selectedNode;
+  const selected = [];
   const focused = [];
   const focus = (node, path = []) => {
     if (claims.has(node))
@@ -183,7 +184,7 @@ function inspectResult(data, menu = false, target) {
     };
     if (isTarget(node)) targetNode ??= read;
     if (claims.has(node)) focusNode ??= read;
-    if (inFocus && node.states?.includes('selected')) selectedNode ??= read;
+    if (inFocus && node.states?.includes('selected')) selected.push(read);
     return read;
   };
   const source = menu
@@ -202,7 +203,11 @@ function inspectResult(data, menu = false, target) {
       'STALE_REF: That control is no longer in the window, so this step did not run.',
     );
   const hash = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
-  const placed = around(tree, targetNode ?? selectedNode ?? focusNode ?? tree);
+  const placed = around(
+    tree,
+    targetNode ?? selected[0] ?? focusNode ?? tree,
+    targetNode ? [] : selected,
+  );
   const checked = placed ?? around(tree, tree);
   if (target && checked !== tree && (found > 1 || !placed))
     throw new Error(
@@ -248,7 +253,7 @@ function wrapper(node) {
   );
 }
 
-function around(tree, anchor) {
+function around(tree, anchor, required = []) {
   const sizes = new WeakMap();
   const whole = (node, depth) => {
     const known = sizes.get(node) ?? new Map();
@@ -257,16 +262,26 @@ function around(tree, anchor) {
     return known.get(depth);
   };
   if (whole(tree, 0) - 1 <= contextChars) return tree;
-  const path = [];
-  const find = (node) => {
-    path.push(node);
-    if (node === anchor || node.children?.some(find)) return true;
-    path.pop();
-    return false;
+  const pathTo = (wanted) => {
+    const path = [];
+    const find = (node) => {
+      path.push(node);
+      if (node === wanted || node.children?.some(find)) return true;
+      path.pop();
+      return false;
+    };
+    return find(tree) ? path : undefined;
   };
-  if (!find(tree)) return undefined;
+  const path = pathTo(anchor);
+  if (!path) return undefined;
   const open = new Set(path);
   const kept = new Set();
+  for (const node of required) {
+    const route = pathTo(node);
+    if (!route) return undefined;
+    route.forEach((step) => open.add(step));
+    kept.add(node);
+  }
   const part = (node) => {
     const shown = node.children.filter((child) => kept.has(child) || open.has(child));
     return {
@@ -283,6 +298,7 @@ function around(tree, anchor) {
   };
   const fits = () => size(tree, 0) - 1 <= contextChars;
   const fit = (node, backwards = false) => {
+    if (kept.has(node)) return;
     kept.add(node);
     if (fits()) return;
     kept.delete(node);

@@ -10067,7 +10067,7 @@ test('computer use checks a large window only around the control it acts on', as
 
 test('computer use checks a grouped mail list around the row it acts on', async (t) => {
   const groups = ['Today', 'Yesterday', 'Last week', 'Last month', 'Older'];
-  const inbox = {
+  const inbox = (selectedRows) => ({
     ok: true,
     data: {
       complete: true,
@@ -10087,7 +10087,10 @@ test('computer use checks a grouped mail list around the row it acts on', async 
                 return {
                   role: 'row',
                   name: `Mail ${number} from sender${number}@example.test ${'preview text '.repeat(30)}`,
-                  states: number === 37 ? ['selected', 'focused'] : [],
+                  states: [
+                    ...(selectedRows.includes(number) ? ['selected'] : []),
+                    ...(number === 37 ? ['focused'] : []),
+                  ],
                 };
               }),
             })),
@@ -10095,8 +10098,10 @@ test('computer use checks a grouped mail list around the row it acts on', async 
         ],
       },
     },
-  };
-  const desktop = await fakeDesktop(t, { snapshot: inbox });
+  });
+  const desktop = await fakeDesktop(t, {
+    snapshot: [inbox([37]), inbox([37]), inbox([3, 37])],
+  });
   const row = (await desktop.helper.request({ op: 'inspect', app: 'Outlook', window: 'w-1' }))
     .context;
   assert.ok(row.length <= 12_000);
@@ -10105,10 +10110,50 @@ test('computer use checks a grouped mail list around the row it acts on', async 
     op: 'inspect',
     app: 'Outlook',
     window: 'w-1',
-    control: { role: 'row', name: inbox.data.tree.children[1].children[2].children[2].name },
+    control: {
+      role: 'row',
+      name: inbox([37]).data.tree.children[1].children[2].children[2].name,
+    },
   });
   assert.ok(click.context.length <= 12_000);
   assert.match(click.context, /Mail 22 from/);
+  const both = (await desktop.helper.request({ op: 'inspect', app: 'Outlook', window: 'w-1' }))
+    .context;
+  assert.match(both, /Mail 3 from/);
+  assert.match(both, /Mail 37 from/);
+});
+
+test('computer use names the inner list as focused when a nested list has focus', async (t) => {
+  const outline = (focused) => ({
+    ok: true,
+    data: {
+      complete: true,
+      tree: {
+        role: 'window',
+        name: 'Projects',
+        children: [
+          {
+            role: 'outline',
+            name: 'Folders',
+            children: ['Inbox', 'Archive'].map((name) => ({
+              role: 'list',
+              name,
+              states: name === focused ? ['focused'] : [],
+              children: [{ role: 'row', name: `${name} item` }],
+            })),
+          },
+        ],
+      },
+    },
+  });
+  const desktop = await fakeDesktop(t, { snapshot: [outline('Inbox'), outline('Archive')] });
+  const inspect = () => desktop.helper.request({ op: 'inspect', app: 'Files', window: 'w-1' });
+  const inbox = await inspect();
+  assert.deepEqual(
+    inbox.focused.map((item) => item.name),
+    ['Inbox'],
+  );
+  assert.notEqual((await inspect()).focus, inbox.focus);
 });
 
 test('computer use treats a list whose cells all report focus as one focused control', async (t) => {
@@ -10194,10 +10239,31 @@ test('computer use reads a window again in front when its tree is not ready in t
   });
   const read = await desktop.helper.request({ op: 'snapshot', app: 'Mail', window: 'w-1' });
   assert.equal(read.tree.name, 'Inbox');
-  assert.deepEqual(
-    (await desktop.calls()).map((call) => call.split(' ')[0]),
-    ['snapshot', 'focus-window', 'snapshot'],
+  const calls = await desktop.calls();
+  assert.equal(calls.length, 3);
+  assert.match(calls[0], /^snapshot --app Mail --window-id w-1 /);
+  assert.equal(calls[1], 'focus-window --app Mail --window-id w-1');
+  assert.match(calls[2], /^snapshot --app Mail --window-id w-1 /);
+});
+
+test('computer use never repeats an input that timed out after it was delivered', async (t) => {
+  const desktop = await fakeDesktop(t, {
+    'list-windows': mailWindow,
+    click: {
+      ok: false,
+      error: {
+        code: 'TIMEOUT',
+        message: 'Operation exceeded its deadline',
+        details: { kind: 'deadline' },
+        disposition: { delivery: 'delivered_unverified', retry: 'unsafe' },
+      },
+    },
+  });
+  await assert.rejects(
+    desktop.helper.request({ op: 'press', ref: '@s1abcdef:e1', app: 'Mail', window: 'w-1' }),
+    /TIMEOUT/,
   );
+  assert.deepEqual(await desktop.calls(), ['click @s1abcdef:e1']);
 });
 
 test('computer use brings a window forward when its control stays disabled in the background', async (t) => {
