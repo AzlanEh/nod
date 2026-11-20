@@ -10065,6 +10065,52 @@ test('computer use checks a large window only around the control it acts on', as
   await assert.rejects(inspect(send), /could not tell which part/);
 });
 
+test('computer use checks a grouped mail list around the row it acts on', async (t) => {
+  const groups = ['Today', 'Yesterday', 'Last week', 'Last month', 'Older'];
+  const inbox = {
+    ok: true,
+    data: {
+      complete: true,
+      tree: {
+        role: 'window',
+        name: 'Inbox - Outlook',
+        children: [
+          { role: 'button', name: 'New mail' },
+          {
+            role: 'table',
+            name: 'Message list',
+            children: groups.map((group, groupIndex) => ({
+              role: 'group',
+              name: group,
+              children: Array.from({ length: 10 }, (_, index) => {
+                const number = groupIndex * 10 + index;
+                return {
+                  role: 'row',
+                  name: `Mail ${number} from sender${number}@example.test ${'preview text '.repeat(30)}`,
+                  states: number === 37 ? ['selected', 'focused'] : [],
+                };
+              }),
+            })),
+          },
+        ],
+      },
+    },
+  };
+  const desktop = await fakeDesktop(t, { snapshot: inbox });
+  const row = (await desktop.helper.request({ op: 'inspect', app: 'Outlook', window: 'w-1' }))
+    .context;
+  assert.ok(row.length <= 12_000);
+  assert.match(row, /Mail 37 from/);
+  const click = await desktop.helper.request({
+    op: 'inspect',
+    app: 'Outlook',
+    window: 'w-1',
+    control: { role: 'row', name: inbox.data.tree.children[1].children[2].children[2].name },
+  });
+  assert.ok(click.context.length <= 12_000);
+  assert.match(click.context, /Mail 22 from/);
+});
+
 test('computer use treats a list whose cells all report focus as one focused control', async (t) => {
   const desktop = await fakeDesktop(t, {
     snapshot: {

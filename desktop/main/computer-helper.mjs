@@ -149,6 +149,7 @@ function inspectResult(data, menu = false, target) {
   let found = 0;
   let targetNode;
   let focusNode;
+  let selectedNode;
   const focused = [];
   const focus = (node, path = []) => {
     if (claims.has(node))
@@ -156,7 +157,7 @@ function inspectResult(data, menu = false, target) {
     if (secure(node)) return;
     node.children?.forEach((child, index) => focus(child, [...path, index]));
   };
-  const walk = (node) => {
+  const walk = (node, inFocus = false) => {
     if (node.subtree_truncated || (node.children_count ?? 0) > (node.children?.length ?? 0))
       throw new Error('POLICY_DENIED: Part of the window is missing, so this step did not run.');
     if (secure(node)) return { role: node.role ?? '', secure: true };
@@ -176,10 +177,13 @@ function inspectResult(data, menu = false, target) {
       ),
       states: (node.states ?? []).filter((state) => !activation.includes(state)).sort(),
       ...(more ? { more: true } : {}),
-      children: kept.map(walk).filter((child) => !emptyGroup(child)),
+      children: kept
+        .map((child) => walk(child, inFocus || claims.has(node)))
+        .filter((child) => !emptyGroup(child)),
     };
     if (isTarget(node)) targetNode ??= read;
     if (claims.has(node)) focusNode ??= read;
+    if (inFocus && node.states?.includes('selected')) selectedNode ??= read;
     return read;
   };
   const source = menu
@@ -198,7 +202,7 @@ function inspectResult(data, menu = false, target) {
       'STALE_REF: That control is no longer in the window, so this step did not run.',
     );
   const hash = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
-  const placed = around(tree, targetNode ?? focusNode ?? tree);
+  const placed = around(tree, targetNode ?? selectedNode ?? focusNode ?? tree);
   const checked = placed ?? around(tree, tree);
   if (target && checked !== tree && (found > 1 || !placed))
     throw new Error(
