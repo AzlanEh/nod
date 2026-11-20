@@ -2671,6 +2671,54 @@ test('computer use presses a menu bar item while the app has an open window', as
   assert.equal(inspected.at(-1)?.menu, true);
 });
 
+test('computer use lists apps when one opened app cannot list its windows', async () => {
+  const pool = {
+    query: async (sql: string) => {
+      if (sql.startsWith('SELECT computer_use'))
+        return { rows: [{ computer_use: true, computer_keep_out: [] }] };
+      if (sql.startsWith('WITH RECURSIVE'))
+        return {
+          rows: [{ id: 'root-turn', source: 'user', message_id: 'message', proactive: false }],
+        };
+      assert.fail(`Unexpected query: ${sql}`);
+    },
+  } as unknown as Pool;
+  const apps = [
+    { pid: 61, bundle: 'com.apple.TextEdit', name: 'TextEdit' },
+    { pid: 62, bundle: 'md.obsidian', name: 'Obsidian' },
+  ];
+  const computer = createComputerUse(pool, 'owner', {
+    platform: 'darwin',
+    desktop: {
+      request: async (request) => {
+        if (request.op === 'apps') return { apps };
+        if (request.op === 'windows') {
+          if (request.pid === 62) throw new Error('TIMEOUT: Operation exceeded its deadline');
+          return { windows: [{ id: 'w-61', title: 'Draft' }] };
+        }
+        throw new Error(`Unexpected ${request.op}`);
+      },
+    },
+  });
+  const turn = { turnId: 'turn', threadId: 'thread' };
+  for (const bundle of ['com.apple.TextEdit', 'md.obsidian'])
+    await computer.execute(
+      turn,
+      'COMPUTER_OPEN',
+      await computer.prepare(turn, 'COMPUTER_OPEN', { bundle }),
+    );
+  const listed = (await computer.execute(
+    turn,
+    'COMPUTER_APPS',
+    await computer.prepare(turn, 'COMPUTER_APPS', {}),
+  )) as { apps: Array<{ pid: number; windows?: unknown; windowsError?: string }> };
+  assert.deepEqual(listed.apps.find((app) => app.pid === 61)?.windows, [
+    { id: 'w-61', title: 'Draft' },
+  ]);
+  assert.match(listed.apps.find((app) => app.pid === 62)?.windowsError ?? '', /TIMEOUT/);
+  await assert.rejects(computer.prepare(turn, 'COMPUTER_SNAPSHOT', { pid: 62 }), /TIMEOUT/);
+});
+
 if (process.env.NOD_TEST_WORKSPACE_IMAGE)
   test(
     'workspace egress through native helpers ignores user startup and PATH hooks',

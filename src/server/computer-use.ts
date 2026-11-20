@@ -219,7 +219,14 @@ const viewOnlyApps: Array<[RegExp, string]> = [
 ];
 
 type Window = { id: string; title: string; hidden?: boolean };
-type App = { pid: number; bundle: string; program?: string; name: string; windows?: Window[] };
+type App = {
+  pid: number;
+  bundle: string;
+  program?: string;
+  name: string;
+  windows?: Window[];
+  windowsError?: string;
+};
 type Identity = { bundle: string; program?: string; name: string; pid?: number };
 type Node = {
   role?: string;
@@ -531,6 +538,17 @@ export function createComputerUse(
     return { ...app, windows: (windows as Window[]) ?? [] };
   }
 
+  async function windowsOrReason(app: App, signal?: AbortSignal): Promise<App> {
+    try {
+      return await windowsOf(app, signal);
+    } catch (error) {
+      signal?.throwIfAborted();
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.startsWith('STOPPED:')) throw error;
+      return { ...app, windowsError: message };
+    }
+  }
+
   function shown(root: string, refId: string) {
     const found = controls.get(root)?.get(refId);
     if (!found)
@@ -788,7 +806,7 @@ export function createComputerUse(
       const apps = await Promise.all(
         (await running(signal)).map((app) =>
           ruleFor(app, keptOut).kind !== 'blocked' && isGranted(root, app)
-            ? windowsOf(app, signal)
+            ? windowsOrReason(app, signal)
             : app,
         ),
       );
@@ -804,7 +822,12 @@ export function createComputerUse(
               : {
                   ...(rule.kind === 'view' ? { viewOnly: rule.why } : {}),
                   ...(isGranted(root, app)
-                    ? { opened: true, windows: app.windows }
+                    ? {
+                        opened: true,
+                        ...(app.windowsError
+                          ? { windowsError: app.windowsError }
+                          : { windows: app.windows }),
+                      }
                     : { opened: false }),
                 }),
           };
@@ -841,7 +864,11 @@ export function createComputerUse(
           pid: app?.pid ?? pid,
           bundle: target.bundle,
           name: target.name,
-          windows: app ? (await windowsOf(app, signal)).windows : [],
+          ...(app
+            ? await windowsOrReason(app, signal).then((read) =>
+                read.windowsError ? { windowsError: read.windowsError } : { windows: read.windows },
+              )
+            : { windows: [] }),
         };
       };
     }
