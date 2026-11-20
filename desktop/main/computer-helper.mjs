@@ -21,8 +21,12 @@ const ref = /^@[a-z0-9]{6,32}:e\d{1,7}$/;
 const windowId = /^[A-Za-z0-9:._-]{1,200}$/;
 const appName = /^[^\0\r\n]{1,200}$/;
 const keys = /^[a-z0-9+.,\-=/ ]{1,40}$/i;
-const needsFocus =
-  /focus fallback is denied|no verified focused element|focus could not be confirmed|physical input is disabled|requires --headed|requires focus permission|did not become actionable/i;
+const focusRefusal =
+  /focus fallback is denied|no verified focused element|focus could not be confirmed|physical input is disabled|requires --headed|requires focus permission/i;
+const needsFocus = (error) =>
+  focusRefusal.test(error.message) ||
+  (error.delivery === 'not_delivered' && error.kind === 'actionability_timeout');
+const activation = ['focused', 'hovered', 'disabled'];
 const pasteRoles = new Set(['scrollarea', 'webarea', 'group', 'document']);
 const appSteps = new Set([
   'open',
@@ -93,9 +97,8 @@ const listRoles = new Set([
   'menu',
 ]);
 const listLimit = 20;
-const listChars = 4000;
 const contextChars = 12_000;
-const deadline = ['--timeout-ms', '10000'];
+const deadline = ['--timeout-ms', '25000'];
 
 const emptyGroup = (node) =>
   node.role === 'group' &&
@@ -145,31 +148,21 @@ function inspectResult(data, menu = false, target) {
     if (secure(node)) return { role: node.role ?? '', secure: true };
     if (isTarget(node)) found++;
     const all = node.children ?? [];
-    const list = listRoles.has(node.role);
-    let children = (list && all.length > listLimit ? all.filter(relevant) : all).map((child) => [
-      child,
-      walk(child),
-    ]);
-    if (
-      list &&
-      children.length === all.length &&
-      JSON.stringify(children.map(([, read]) => bound(read))).length > listChars
-    )
-      children = children.filter(([child]) => relevant(child));
-    const more = children.length < all.length;
+    const kept = listRoles.has(node.role) && all.length > listLimit ? all.filter(relevant) : all;
+    const more = kept.length < all.length;
     if (more) trimmed = true;
     const read = {
       role: node.role ?? '',
       name: node.name ?? '',
       value: node.value ?? null,
       ...Object.fromEntries(
-        [...described, 'native_id', 'available_actions']
+        [...described, 'native_id']
           .filter((key) => node[key] != null)
           .map((key) => [key, node[key]]),
       ),
-      states: (node.states ?? []).filter((state) => !['focused', 'hovered'].includes(state)).sort(),
+      states: (node.states ?? []).filter((state) => !activation.includes(state)).sort(),
       ...(more ? { more: true } : {}),
-      children: children.map(([, read]) => read).filter((child) => !emptyGroup(child)),
+      children: kept.map(walk).filter((child) => !emptyGroup(child)),
     };
     if (isTarget(node)) targetNode ??= read;
     if (isFocused(node)) focusNode ??= read;
@@ -198,41 +191,31 @@ function inspectResult(data, menu = false, target) {
     );
   return {
     context: render(checked).join('\n'),
-    state: hash(bound(checked)),
+    state: hash(checked),
     focus: hash(focused),
     focused,
     incomplete: trimmed || checked !== tree,
   };
 }
 
-function bound(node) {
-  const { available_actions: _, ...rest } = node;
-  return {
-    ...rest,
-    ...(node.states ? { states: node.states.filter((state) => state !== 'disabled') } : {}),
-    ...(node.children ? { children: node.children.map(bound) } : {}),
-  };
-}
-
 const quote = (text) => JSON.stringify(String(text));
 const described = ['description', 'hint', 'placeholder', 'subrole', 'role_description'];
 
-function line(node, depth, measure = false) {
+function line(node, depth) {
   let text = `${'  '.repeat(depth)}- ${node.role || 'element'}`;
   if (node.secure) return `${text} [password, hidden]`;
   if (node.name) text += ` ${quote(node.name)}`;
   if (node.value != null) text += ` = ${quote(node.value)}`;
   for (const key of described) if (node[key] != null) text += ` ${key}: ${quote(node[key])}`;
-  const states = measure ? node.states?.filter((state) => state !== 'disabled') : node.states;
-  if (states?.length) text += ` (${states.join(', ')})`;
+  if (node.states?.length) text += ` (${node.states.join(', ')})`;
   if (node.more) text += ' [more not shown]';
   return text;
 }
 
-function render(node, depth = 0, measure = false) {
+function render(node, depth = 0) {
   const inner = depth + (wrapper(node) ? 0 : 1);
-  const children = (node.children ?? []).flatMap((child) => render(child, inner, measure));
-  return wrapper(node) ? children : [line(node, depth, measure), ...children];
+  const children = (node.children ?? []).flatMap((child) => render(child, inner));
+  return wrapper(node) ? children : [line(node, depth), ...children];
 }
 
 function wrapper(node) {
@@ -251,7 +234,7 @@ function around(tree, anchor) {
   const whole = (node, depth) => {
     const known = sizes.get(node) ?? new Map();
     sizes.set(node, known);
-    if (!known.has(depth)) known.set(depth, render(node, depth, true).join('\n').length + 1);
+    if (!known.has(depth)) known.set(depth, render(node, depth).join('\n').length + 1);
     return known.get(depth);
   };
   if (whole(tree, 0) - 1 <= contextChars) return tree;
@@ -275,7 +258,7 @@ function around(tree, anchor) {
   const size = (node, depth) => {
     if (kept.has(node)) return whole(node, depth);
     const { node: self, shown } = part(node);
-    const own = wrapper(self) ? 0 : line(self, depth, true).length + 1;
+    const own = wrapper(self) ? 0 : line(self, depth).length + 1;
     const inner = depth + (wrapper(self) ? 0 : 1);
     return own + shown.reduce((sum, child) => sum + size(child, inner), 0);
   };
@@ -435,7 +418,12 @@ export function createComputerHelper({
           if (envelope.ok) return resolve(envelope.data ?? {});
           const failure = envelope.error ?? {};
           reject(
-            new Error(`${failure.code ?? 'ERROR'}: ${failure.message ?? 'agent-desktop failed.'}`),
+            Object.assign(
+              new Error(
+                `${failure.code ?? 'ERROR'}: ${failure.message ?? 'agent-desktop failed.'}`,
+              ),
+              { kind: failure.details?.kind, delivery: failure.disposition?.delivery },
+            ),
           );
         },
       );
@@ -745,7 +733,7 @@ export function createComputerHelper({
       try {
         return await guarded(request, args, input);
       } catch (error) {
-        if (!window || !needsFocus.test(error.message)) throw error;
+        if (!window || !needsFocus(error)) throw error;
       }
     if (inFront) stale.add(target.window);
     return focused(target, window, async () => {
@@ -753,7 +741,7 @@ export function createComputerHelper({
       try {
         return await guarded(request, args, input);
       } catch (error) {
-        if (!needsFocus.test(error.message)) throw error;
+        if (!needsFocus(error)) throw error;
         return guarded(request, [...args, '--headed'], input);
       }
     });
@@ -815,53 +803,33 @@ export function createComputerHelper({
       else await run(['permissions', request.which === 'screen' ? '--guide' : '--request']);
       return permissions();
     },
-    apps: async () => {
-      const [{ apps }, all] = await Promise.all([
-        run(['list-apps']),
-        run(['list-windows']).catch(() => undefined),
-      ]);
-      const windows =
-        all ??
-        (
-          await Promise.all(
-            apps
-              .filter((app) => app.presentation !== 'background')
-              .map(async (app) => {
-                try {
-                  return await run(['list-windows', '--app', check(app.name, appName, 'app')]);
-                } catch (error) {
-                  if (/^STOPPED:/.test(error.message)) throw error;
-                  return [];
-                }
-              }),
-          )
-        ).flat();
-      return {
-        apps: await Promise.all(
-          apps.map(async (app) => ({
-            pid: app.pid,
-            bundle: app.bundle_id ?? (platform === 'linux' ? '' : app.name),
-            ...(platform === 'linux'
-              ? {
-                  program: sandboxed
-                    ? ''
-                    : await readlink(`/proc/${app.pid}/exe`).then(basename, () => ''),
-                }
-              : platform === 'win32'
-                ? { program: app.name }
-                : {}),
-            name: app.name,
-            windows: windows
-              .filter((window) => window.pid === app.pid && window.accessible !== false)
-              .map((window) => ({
-                id: window.id,
-                title: window.title ?? '',
-                ...(window.visible === false ? { hidden: true } : {}),
-              })),
-          })),
-        ),
-      };
-    },
+    apps: async () => ({
+      apps: await Promise.all(
+        (await run(['list-apps'])).apps.map(async (app) => ({
+          pid: app.pid,
+          bundle: app.bundle_id ?? (platform === 'linux' ? '' : app.name),
+          ...(platform === 'linux'
+            ? {
+                program: sandboxed
+                  ? ''
+                  : await readlink(`/proc/${app.pid}/exe`).then(basename, () => ''),
+              }
+            : platform === 'win32'
+              ? { program: app.name }
+              : {}),
+          name: app.name,
+        })),
+      ),
+    }),
+    windows: async (request) => ({
+      windows: (await run(['list-windows', '--app', check(request.app, appName, 'app')]))
+        .filter((window) => window.pid === request.pid && window.accessible !== false)
+        .map((window) => ({
+          id: window.id,
+          title: window.title ?? '',
+          ...(window.visible === false ? { hidden: true } : {}),
+        })),
+    }),
     locate: async (request) => {
       const { bundle, name, program } = await locate(request);
       return { bundle, name, program };

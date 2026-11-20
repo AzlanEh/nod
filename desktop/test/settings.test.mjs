@@ -10102,7 +10102,15 @@ test('computer use brings a window forward when its control stays disabled in th
   const desktop = await fakeDesktop(t, {
     'list-windows': mailWindow,
     'click @s1abcdef:e1 --headed': { ok: true, data: {} },
-    click: refused('TIMEOUT', 'Target did not become actionable within the wait budget'),
+    click: {
+      ok: false,
+      error: {
+        code: 'TIMEOUT',
+        message: 'Target did not become actionable within the wait budget',
+        details: { kind: 'actionability_timeout' },
+        disposition: { delivery: 'not_delivered', retry: 'safe' },
+      },
+    },
   });
   await desktop.helper.request({ op: 'press', ref: '@s1abcdef:e1', app: 'Mail', window: 'w-1' });
   assert.deepEqual(await desktop.calls(), [
@@ -10115,23 +10123,17 @@ test('computer use brings a window forward when its control stays disabled in th
 
 test('computer use lists hidden and minimized windows it can read and skips ones it cannot', async (t) => {
   const desktop = await fakeDesktop(t, {
-    'list-apps': {
-      ok: true,
-      data: { apps: [{ pid: 7, bundle_id: 'md.obsidian', name: 'Obsidian' }] },
-    },
-    'list-windows': {
+    'list-windows --app Obsidian': {
       ok: true,
       data: [
         { id: 'w-backdrop', pid: 7, title: 'Untitled', accessible: false, visible: true },
         { id: 'w-note', pid: 7, title: 'Note', accessible: true, visible: false, minimized: true },
+        { id: 'w-other', pid: 8, title: 'Other', accessible: true, visible: true },
       ],
     },
   });
-  const { apps } = await desktop.helper.request({ op: 'apps' });
-  assert.deepEqual(
-    apps[0].windows.map((window) => window.id),
-    ['w-note'],
-  );
+  const { windows } = await desktop.helper.request({ op: 'windows', app: 'Obsidian', pid: 7 });
+  assert.deepEqual(windows, [{ id: 'w-note', title: 'Note', hidden: true }]);
 });
 
 test('computer use still lists apps when the frontmost app does not answer accessibility', async (t) => {
@@ -10496,7 +10498,7 @@ test('computer use pastes into a message body in front and restores the owner cl
   assert.deepEqual(await desktop.calls(), [
     'focus-window --app Mail --window-id w-1',
     'focus @s1abcdef:e1',
-    'find --app Mail --window-id w-1 --state focused --limit 0 --timeout-ms 10000',
+    'find --app Mail --window-id w-1 --state focused --limit 0 --timeout-ms 25000',
     'press cmd+v --app Mail --window-id w-1 --headed',
   ]);
   assert.equal(desktop.clipboard(), 'owner copied this');

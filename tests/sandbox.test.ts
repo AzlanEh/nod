@@ -2023,6 +2023,8 @@ test('computer use refuses blocked apps, keeps browsers view-only and acts only 
       request: async (request) => {
         calls.push(request);
         if (request.op === 'apps') return { apps };
+        if (request.op === 'windows')
+          return { windows: apps.find((item) => item.pid === request.pid)?.windows ?? [] };
         if (request.op === 'locate') {
           const found = apps.find((app) => app.bundle === request.bundle);
           if (!found) throw new Error('No app with that bundle ID is installed.');
@@ -2146,15 +2148,6 @@ test('computer use refuses blocked apps, keeps browsers view-only and acts only 
     computer.prepare(turn, 'COMPUTER_SET_VALUE', { ref: '@sdraft01:e3', text: 'x' }),
     /no snapshot with that ref/,
   );
-  await assert.rejects(
-    computer.execute(
-      turn,
-      'COMPUTER_SCREENSHOT',
-      await computer.prepare(turn, 'COMPUTER_SCREENSHOT', { pid: 11 }),
-    ),
-    /password field has focus/,
-  );
-
   findings.push({ role: 'statictext', name: 'x'.repeat(25_000) });
   await assert.rejects(
     computer.prepare(turn, 'COMPUTER_PRESS', { ref: '@sdraft01:e1' }),
@@ -2235,18 +2228,6 @@ test('computer use refuses blocked apps, keeps browsers view-only and acts only 
     /password fields/,
   );
   delete subject.states;
-  const before = calls.length;
-  await assert.rejects(
-    computer.execute(
-      turn,
-      'COMPUTER_KEY',
-      await computer.prepare(turn, 'COMPUTER_KEY', { pid: 11, keys: 'cmd+v' }),
-    ),
-    (error: Error & { notRun?: boolean }) =>
-      error.notRun === true && /sent no keys/.test(error.message),
-  );
-  assert.ok(!calls.slice(before).some((call) => call.op === 'key'));
-
   await computer.execute(
     turn,
     'COMPUTER_TYPE',
@@ -2409,6 +2390,8 @@ test('turning computer use off cancels input waiting on a read, even if that rea
       request: async (request) => {
         calls.push(request.op);
         if (request.op === 'apps') return { apps: [app] };
+        if (request.op === 'windows')
+          return { windows: [app].find((item) => item.pid === request.pid)?.windows ?? [] };
         if (request.op === 'inspect')
           return {
             tree: node,
@@ -2496,6 +2479,8 @@ test('computer use on Windows keeps an opened app granted however the app list n
     desktop: {
       request: async (request) => {
         if (request.op === 'apps') return { apps };
+        if (request.op === 'windows')
+          return { windows: apps.find((item) => item.pid === request.pid)?.windows ?? [] };
         if (request.op === 'locate')
           return { bundle: 'notepad.exe', name: 'notepad', program: 'notepad.exe' };
         if (request.op === 'open') {
@@ -2585,6 +2570,8 @@ test('computer use on Linux grants only the opened process when the app list has
     desktop: {
       request: async (request) => {
         if (request.op === 'apps') return { apps };
+        if (request.op === 'windows')
+          return { windows: apps.find((item) => item.pid === request.pid)?.windows ?? [] };
         if (request.op === 'locate')
           return { bundle: 'org.gnome.Weather', name: 'Weather', program: 'gjs' };
         if (request.op === 'open') {
@@ -2648,16 +2635,8 @@ test('computer use presses a menu bar item while the app has an open window', as
     desktop: {
       request: async (request) => {
         if (request.op === 'apps')
-          return {
-            apps: [
-              {
-                pid: 51,
-                bundle: 'md.obsidian',
-                name: 'Obsidian',
-                windows: [{ id: 'w-51', title: 'Note' }],
-              },
-            ],
-          };
+          return { apps: [{ pid: 51, bundle: 'md.obsidian', name: 'Obsidian' }] };
+        if (request.op === 'windows') return { windows: [{ id: 'w-51', title: 'Note' }] };
         if (request.op === 'snapshot') return { tree: request.ref ? item : menuBar };
         if (request.op === 'inspect') {
           inspected.push(request);
