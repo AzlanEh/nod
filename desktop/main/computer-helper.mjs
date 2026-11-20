@@ -23,9 +23,13 @@ const appName = /^[^\0\r\n]{1,200}$/;
 const keys = /^[a-z0-9+.,\-=/ ]{1,40}$/i;
 const focusRefusal =
   /focus fallback is denied|no verified focused element|focus could not be confirmed|physical input is disabled|requires --headed|requires focus permission/i;
+const unready = (error) =>
+  error.kind === 'deadline' ||
+  /has not published its accessibility tree|tree is still thin/i.test(error.message);
 const needsFocus = (error) =>
   focusRefusal.test(error.message) ||
-  (error.delivery === 'not_delivered' && error.kind === 'actionability_timeout');
+  (error.delivery === 'not_delivered' && error.kind === 'actionability_timeout') ||
+  unready(error);
 const activation = ['focused', 'hovered', 'disabled'];
 const pasteRoles = new Set(['scrollarea', 'webarea', 'group', 'document']);
 const appSteps = new Set([
@@ -798,7 +802,12 @@ export function createComputerHelper({
 
   async function observe(request, work) {
     const target = { app: request.app, window: request.window };
-    if (!stale.has(target.window)) return work();
+    if (!stale.has(target.window))
+      try {
+        return await work();
+      } catch (error) {
+        if (!target.window || !needsFocus(error)) throw error;
+      }
     const window = await windowOf(target);
     if (!window) return work();
     const result = await focused(target, window, work);

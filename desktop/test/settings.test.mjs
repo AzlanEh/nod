@@ -10130,6 +10130,30 @@ test('computer use keeps a window binding when another control turns on as the a
   assert.notEqual((await inspect()).state, background.state);
 });
 
+test('computer use reads a window again in front when its tree is not ready in the background', async (t) => {
+  const desktop = await fakeDesktop(t, {
+    'list-windows': mailWindow,
+    snapshot: [
+      {
+        ok: false,
+        error: {
+          code: 'TIMEOUT',
+          message: 'Operation exceeded its deadline',
+          details: { kind: 'deadline' },
+          disposition: { delivery: 'not_delivered', retry: 'safe' },
+        },
+      },
+      { ok: true, data: { complete: true, tree: { role: 'window', name: 'Inbox' } } },
+    ],
+  });
+  const read = await desktop.helper.request({ op: 'snapshot', app: 'Mail', window: 'w-1' });
+  assert.equal(read.tree.name, 'Inbox');
+  assert.deepEqual(
+    (await desktop.calls()).map((call) => call.split(' ')[0]),
+    ['snapshot', 'focus-window', 'snapshot'],
+  );
+});
+
 test('computer use brings a window forward when its control stays disabled in the background', async (t) => {
   const desktop = await fakeDesktop(t, {
     'list-windows': mailWindow,
