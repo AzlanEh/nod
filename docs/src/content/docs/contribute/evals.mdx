@@ -97,6 +97,7 @@ Run each command as `pnpm run eval:capability <command>`. `help` lists every opt
 | ---------------------- | ------------------------------------------------------------------------------------- |
 | See every scenario     | `list`                                                                                |
 | Run a subset           | `run --scenario invoices-overdue --repeat 5`, `run --capability browser`              |
+| Split across machines  | `run --shard 1/4 --label run-s1`, then `merge run-s1 ... --label run`                 |
 | Run the release suite  | `run --tier release` (see [Run the release suite](#run-the-release-suite))            |
 | Compare models         | `models openai/gpt-6.1-sol anthropic/claude-sonnet-5-5 --tier pr`                     |
 | Compare a PR with main | `refs main my-branch --tier pr` (same scenarios, another revision of `src/`)          |
@@ -201,12 +202,13 @@ WhisperBench hashes complete workspace files to detect changes. It captures at m
 
 The **Evals** workflow runs the suite with a disposable PostgreSQL and images built from the code under test. Its scores don't gate CI, deployments or releases. It never runs the release suite: the workflow offers only the **pr** and **full** tiers, and release cases never join the gate.
 
-|               | Nightly                                        | On demand                                                                                   |
-| ------------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| Start         | Every day at 01:23 UTC on `main`               | **Actions → Evals → Run workflow**                                                          |
-| Suite         | Full controlled suite, three attempts per case | **full** by default, or the small **pr** tier, named cases, one capability or a spend limit |
-| Compared with | Nothing; it scores `main` alone                | **baseline**: `main`, a branch, a tag or `latest-release`, or nothing                       |
-| Time limit    | Six hours                                      | Six hours for **full**, 90 minutes for **pr**                                               |
+|               | Nightly                                        | On demand                                                                                      |
+| ------------- | ---------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| Start         | Every day at 01:23 UTC on `main`               | **Actions → Evals → Run workflow**                                                             |
+| Suite         | Full controlled suite, three attempts per case | **full** by default, or the small **pr** tier, named cases, one capability or a spend limit    |
+| Shards        | 4 parallel shards (4 concurrent attempts each) | **shards**: 1–8 per side (default 4 for **full**, 2 for **pr**, 1 for named scenarios)         |
+| Compared with | Nothing; it scores `main` alone                | **baseline**: `main`, a branch, a tag or `latest-release`, or nothing (shards run in parallel) |
+| Time limit    | Three hours per shard                          | Three hours per shard for **full**, 90 minutes for **pr**                                      |
 
 In the CLI, use `--effort medium` or another supported level for a separate reasoning-effort comparison. The Actions workflow has no effort input. This changes only the main agent, including its helpers; Trust checks and approval-reply classification keep their production effort. The run manifest records the chosen effort. The default is high. Keep model and effort fixed when you compare harness changes.
 

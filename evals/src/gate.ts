@@ -1,6 +1,6 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { fisherLower, holm, pairedChange } from './aggregate.ts';
+import { fisherLower, holm, pairedChange, summarize } from './aggregate.ts';
 import { markdown, verdictMarkdown } from './report.ts';
 import type { AttemptResult, RunManifest } from './results.ts';
 import { runSuite, slug, type RunOptions } from './run.ts';
@@ -185,9 +185,15 @@ export async function promote(root: string, labels: string[], file = gateFile) {
   return sorted;
 }
 
-export async function runGate(
-  options: RunOptions & { baseline: string; resample: number; label: string },
-) {
+export async function evaluateGate(options: {
+  root: string;
+  baselineLabel: string;
+  candidateLabel: string;
+  baselineName: string;
+  label: string;
+  resample?: number;
+  runOptions?: RunOptions;
+}) {
   const members = await readMembers();
   const current = Object.fromEntries(
     Object.entries(members).filter(
@@ -196,20 +202,20 @@ export async function runGate(
     ),
   );
   const skipped = Object.keys(members).filter((id) => !(id in current));
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,74}$/.test(options.label))
-    throw new Error('Gate labels must be simple file names of at most 75 characters.');
-  const label = options.label;
-  const named = `${slug(options.baseline)}-for-${label}`.slice(0, 75);
-  const side = (label: string, ref: string | undefined, extra: Partial<RunOptions> = {}) =>
-    runSuite({ ...options, label, ref, resume: false, ...extra });
+  const readSide = async (name: string) => {
+    const dir = join(options.root, name);
+    const manifest = JSON.parse(await readFile(join(dir, 'manifest.json'), 'utf8')) as RunManifest;
+    const attempts = await readAttempts(dir);
+    return { manifest, attempts, summary: summarize(manifest, attempts) };
+  };
   let result: GateResult;
   let comparison = '';
   let resampled = false;
-  let model = options.model ?? '';
-  let judge = options.judge ?? '';
+  let model = '';
+  let judge = '';
   try {
-    const candidate = await side(label, undefined);
-    const baseline = await side(named, options.baseline);
+    const candidate = await readSide(options.candidateLabel);
+    const baseline = await readSide(options.baselineLabel);
     model = candidate.manifest.model;
     judge = candidate.manifest.judge;
     comparison = markdown([baseline, candidate]);
@@ -217,15 +223,17 @@ export async function runGate(
       Object.entries(current).filter(([id]) => candidate.manifest.scenarioIds?.includes(id)),
     );
     result = decide(measured, baseline, candidate);
-    if (options.resample && result.suspects.length) {
+    if (options.resample && options.runOptions && result.suspects.length) {
+      const side = (label: string, ref: string | undefined, extra: Partial<RunOptions>) =>
+        runSuite({ ...options.runOptions!, label, ref, resume: false, shard: undefined, ...extra });
       const extra = {
         scenarioIds: result.suspects,
         repeat: options.resample,
         k: options.resample,
         canary: false,
       };
-      const more = await side(`${label}-more`, undefined, extra);
-      const less = await side(`${named}-more`, options.baseline, extra);
+      const more = await side(`${options.label}-more`, undefined, extra);
+      const less = await side(`${options.baselineLabel}-more`, options.baselineName, extra);
       resampled = true;
       result = decide(
         measured,
@@ -247,7 +255,7 @@ export async function runGate(
     verdictMarkdown(result, {
       model,
       judge,
-      baseline: options.baseline,
+      baseline: options.baselineName,
       skipped,
       compared: Boolean(comparison),
       resampled,
@@ -257,9 +265,9 @@ export async function runGate(
     .filter(Boolean)
     .join('\n\n');
   await mkdir(options.root, { recursive: true });
-  await writeFile(join(options.root, `${label}-gate.md`), `${report}\n`);
+  await writeFile(join(options.root, `${options.label}-gate.md`), `${report}\n`);
   await writeFile(
-    join(options.root, `${label}-gate.json`),
+    join(options.root, `${options.label}-gate.json`),
     JSON.stringify(
       { verdict: result.verdict, blocking: result.blocking, unclear: result.unclear },
       null,
@@ -267,4 +275,61 @@ export async function runGate(
     ),
   );
   return { ...result, report };
+}
+
+export async function runGate(
+  options: RunOptions & { baseline: string; resample: number; label: string },
+) {
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,74}$/.test(options.label))
+    throw new Error('Gate labels must be simple file names of at most 75 characters.');
+  const label = options.label;
+  const named = `${slug(options.baseline)}-for-${label}`.slice(0, 75);
+  const side = (name: string, ref: string | undefined) =>
+    runSuite({ ...options, label: name, ref, resume: false });
+  try {
+    await side(label, undefined);
+    await side(named, options.baseline);
+  } catch (error) {
+    const members = await readMembers();
+    const skipped = Object.keys(members).filter(
+      (id) =>
+        !(scenarios.some((item) => item.id === id) && fingerprint(id) === members[id].fingerprint),
+    );
+    const result: GateResult = {
+      verdict: 'INCONCLUSIVE',
+      blocking: [],
+      unclear: [error instanceof Error ? error.message : String(error)],
+      scenarios: [],
+      drift: [],
+      suspects: [],
+    };
+    const report = verdictMarkdown(result, {
+      model: options.model ?? '',
+      judge: options.judge ?? '',
+      baseline: options.baseline,
+      skipped,
+      compared: false,
+      resampled: false,
+    });
+    await mkdir(options.root, { recursive: true });
+    await writeFile(join(options.root, `${label}-gate.md`), `${report}\n`);
+    await writeFile(
+      join(options.root, `${label}-gate.json`),
+      JSON.stringify(
+        { verdict: result.verdict, blocking: result.blocking, unclear: result.unclear },
+        null,
+        2,
+      ),
+    );
+    return { ...result, report };
+  }
+  return evaluateGate({
+    root: options.root,
+    baselineLabel: named,
+    candidateLabel: label,
+    baselineName: options.baseline,
+    label,
+    resample: options.resample,
+    runOptions: options,
+  });
 }
