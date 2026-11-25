@@ -270,7 +270,7 @@ Category views show the observed mix, execution outcomes and duration, known mod
 | Event                     | What it records                                                                                                       |
 | ------------------------- | --------------------------------------------------------------------------------------------------------------------- |
 | `output_created`          | Committed assistant presentation or file delivery, by kind and count.                                                 |
-| `presentation_viewed`     | Visible image/map/flights/seats/booking/chart/apps/diagram presentation.                                              |
+| `presentation_viewed`     | Visible image/map/flights/seats/booking/chart/apps/diagram/items/schedule/facts/compare presentation.                 |
 | `presentation_action`     | Presentation kind, message/drawer location, and successful open/copy action.                                          |
 | `artifact_viewed`         | Artifact kind and message/drawer location.                                                                            |
 | `artifact_action`         | Kind, message/drawer/commands/composer location, and copy/download/download-request/open/reveal/reuse-request action. |

@@ -405,6 +405,14 @@ export function MessageBubble({
             : message.choiceAnswer
               ? 'answered'
               : null;
+  const outsideCard =
+    message.role === 'assistant' &&
+    !streaming &&
+    Boolean(visibleText.trim()) &&
+    (message.presentation?.type === 'items' ||
+      message.presentation?.type === 'schedule' ||
+      message.presentation?.type === 'facts' ||
+      message.presentation?.type === 'compare');
   const cardText = card ? splitQuestion(visibleText) : null;
   const shownText =
     message.role === 'assistant' && message.approval?.fields && message.approval.cardQuestion
@@ -835,6 +843,7 @@ export function MessageBubble({
               {message.role === 'assistant' &&
                 !streaming &&
                 message.presentation &&
+                !outsideCard &&
                 message.presentation.type !== 'apps' &&
                 message.presentation.type !== 'schedule-run' &&
                 (message.presentation.type === 'bug-report' ? (
@@ -981,9 +990,12 @@ export function MessageBubble({
           </div>
         </div>
         {task && <div className="message-task">{task}</div>}
-        {message.role === 'assistant' && !streaming && message.presentation?.type === 'apps' && (
-          <MessagePresentation value={message.presentation} messageId={message.id} />
-        )}
+        {message.role === 'assistant' &&
+          !streaming &&
+          message.presentation &&
+          (outsideCard || message.presentation.type === 'apps') && (
+            <MessagePresentation value={message.presentation} messageId={message.id} />
+          )}
         {message.role === 'assistant' && !streaming && message.approval?.fields && (
           <ApprovalCard approval={message.approval} disabled={answersDisabled} onAnswer={onApprove}>
             <ApprovalFields

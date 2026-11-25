@@ -4,6 +4,7 @@ import { ArrowRight, ChevronDown, ExternalLink, Maximize2 } from './icons';
 import { useArtifactDrawer } from './artifact-context';
 import { ConnectApps } from './presentation-apps';
 import { Booking } from './presentation-booking';
+import { CardHead, CardNote, Compare, FactList, Items, Schedule } from './presentation-cards';
 import { PresentationChart } from './presentation-chart';
 import { Flights, Seats } from './presentation-travel';
 import { useAnalyticsView } from '../hooks/use-analytics-view';
@@ -81,6 +82,15 @@ export function MessagePresentation({
       {visual.type === 'chart' && (
         <PresentationChart key={JSON.stringify(visual)} visual={visual} />
       )}
+      {(visual.type === 'items' ||
+        visual.type === 'schedule' ||
+        visual.type === 'facts' ||
+        visual.type === 'compare') && <CardHead visual={visual} />}
+      {visual.type === 'items' && <Items key={JSON.stringify(visual)} visual={visual} />}
+      {visual.type === 'schedule' && <Schedule visual={visual} />}
+      {visual.type === 'facts' && <FactList visual={visual} />}
+      {visual.type === 'compare' && <Compare visual={visual} />}
+      {'note' in visual && <CardNote note={visual.note} />}
       {visual.type !== 'flights' && (visual.asOf || visual.sources.length > 0) && (
         <details className="presentation-sources">
           <summary>

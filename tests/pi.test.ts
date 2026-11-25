@@ -3944,6 +3944,13 @@ test('send_message validates structured visuals and delivers each distinct prese
       },
     ],
   };
+  const items: Presentation = {
+    version: 1,
+    type: 'items',
+    title: 'Synthetic list',
+    sources: [],
+    items: [{ title: 'Synthetic row' }],
+  };
   for (const text of ['The request reaches the answer.', ''])
     await t.test(text ? 'with accompanying text' : 'visual only', async (t) => {
       const replies: Array<Parameters<RuntimeContext['reply']>> = [];
@@ -3963,15 +3970,28 @@ test('send_message validates structured visuals and delivers each distinct prese
               assert.equal(exposed.Check(presentation), true);
               assert.equal(exposed.Check({ ...presentation, version: 2 }), false);
               assert.equal(exposed.Check(legacyFlight), false);
+              assert.equal(
+                exposed.Check({
+                  ...legacyFlight,
+                  options: [{ ...legacyFlight.options[0], status: 'booked' }],
+                }),
+                false,
+              );
               const send = input.tools.find((tool) => tool.name === 'send_message')!;
               await assert.rejects(
-                send.execute({ text: '', presentation: legacyFlight }),
+                send.execute({
+                  text: '',
+                  presentation: {
+                    ...items,
+                    items: [{ title: 'Synthetic', status: { label: 'Odd', tone: 'unverified' } }],
+                  },
+                }),
                 (error: unknown) => {
                   assert.ok(error instanceof Error);
-                  assert.match(error.message, /\/presentation\/options\/0\/status/);
-                  for (const status of ['booked', 'option', 'unknown'])
-                    assert.ok(error.message.includes(status));
-                  assert.ok(!error.message.includes(legacyFlight.title));
+                  assert.match(error.message, /\/presentation\/items\/0\/status\/tone/);
+                  for (const tone of ['new', 'waiting', 'done', 'failed'])
+                    assert.ok(error.message.includes(tone));
+                  assert.ok(!error.message.includes(items.title));
                   return true;
                 },
               );
@@ -3981,7 +4001,7 @@ test('send_message validates structured visuals and delivers each distinct prese
                   text: '',
                   presentation: {
                     ...legacyFlight,
-                    options: [{ ...legacyFlight.options[0], status: 'unverified' }],
+                    options: [{ ...legacyFlight.options[0], status: 'booked' }],
                   },
                 },
                 {
@@ -3992,13 +4012,13 @@ test('send_message validates structured visuals and delivers each distinct prese
               ])
                 await assert.rejects(send.execute(value));
               assert.equal(replies.length, 0);
-              for (const status of ['booked', 'option', 'unknown'] as const) {
-                const flight: Presentation = {
-                  ...legacyFlight,
-                  options: [{ ...legacyFlight.options[0], status }],
+              for (const tone of ['new', 'waiting', 'done'] as const) {
+                const card: Presentation = {
+                  ...items,
+                  items: [{ title: 'Synthetic row', status: { label: tone, tone } }],
                 };
-                assert.equal(exposed.Check(flight), true);
-                await send.execute({ text: '', presentation: flight });
+                assert.equal(exposed.Check(card), true);
+                await send.execute({ text: '', presentation: card });
               }
               const value = {
                 text,
@@ -4034,12 +4054,63 @@ test('send_message validates structured visuals and delivers each distinct prese
       assert.equal(replies[4][3]?.title, 'Updated synthetic delivery');
       assert.deepEqual(
         replies.slice(0, 3).map((reply) => {
-          assert.equal(reply[3]?.type, 'flights');
-          return reply[3]?.type === 'flights' ? reply[3].options[0].status : undefined;
+          assert.equal(reply[3]?.type, 'items');
+          return reply[3]?.type === 'items' ? reply[3].items[0]?.status?.tone : undefined;
         }),
-        ['booked', 'option', 'unknown'],
+        ['new', 'waiting', 'done'],
       );
     });
+  await t.test('a card to pick from asks with its rows as answer choices', async (t) => {
+    const replies: Array<Parameters<RuntimeContext['reply']>> = [];
+    const row = (index: number) => ({ title: `Option ${index}`, value: `€${index}0` });
+    const runtime = createAgentRuntime({
+      agent: {
+        open: async (input) => ({
+          resumed: false,
+          abort() {},
+          dispose() {},
+          prompt: async () => {
+            const send = input.tools.find((tool) => tool.name === 'send_message')!;
+            const pick = { question: 'Which one?' };
+            await assert.rejects(
+              send.execute({
+                text: '',
+                presentation: { ...items, pick, items: [1, 2, 3, 4, 5, 6, 7].map(row) },
+              }),
+            );
+            assert.equal(replies.length, 0);
+            await send.execute({
+              text: '',
+              presentation: { ...items, pick, items: [1, 2].map(row) },
+            });
+          },
+        }),
+        dispose() {},
+      },
+      computer: fakeComputer(),
+      workspace: fakeWorkspace(),
+    });
+    t.after(() => runtime.dispose());
+    const result = await runtime.runTurn({
+      ...context(directory),
+      turnId: randomUUID(),
+      reply: async (...args) => {
+        replies.push(args);
+      },
+    });
+    assert.equal(replies.length, 1);
+    assert.equal(replies[0][3]?.type, 'items');
+    assert.equal(result.status, 'waiting_user');
+    assert.equal(result.message, 'Which one?');
+    assert.deepEqual(
+      result.answerChoices?.options.map(({ label, description }) => [label, description]),
+      [
+        ['Option 1', '€10'],
+        ['Option 2', '€20'],
+      ],
+    );
+    assert.equal(result.answerChoices?.multiple, false);
+  });
 });
 
 const chatgptHostId = '6f1c2f4e-3b8a-4d2e-9c51-0a7e2b9d4f10';

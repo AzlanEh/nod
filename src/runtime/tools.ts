@@ -10,7 +10,13 @@ import {
 import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
 import { answerChoiceInputSchema, answerChoicesSchema } from '../shared/answer-choices.ts';
-import { presentationInputSchema, type Presentation } from '../shared/presentation.ts';
+import {
+  flightItems,
+  presentationInputSchema,
+  presentationPick,
+  presentationSchema,
+  type Presentation,
+} from '../shared/presentation.ts';
 import { proactiveUpdateSchema, sourceReadSchema } from '../shared/proactivity.ts';
 import { Value } from '@sinclair/typebox/value';
 import {
@@ -233,7 +239,7 @@ const presentation = Type.Unsafe<Presentation>({
 export const toolDefinitions = {
   flights: defineTool(
     'flights',
-    'Search live Google Flights fares and schedules. Each search is one way, or a round trip with returnDate. Put nearby airports in one search, and list up to six searches to compare dates or routes in one call. For a multi-city trip or stopover, search each leg; those are separate tickets. Use IATA codes, the conversation language code and the owner\'s currency. Prices are totals for all travellers with taxes, before bags and seat fees. Show options with send_message presentation {version:1,type:"flights",title,options:[{id,recommended?,label?}]}; Nod fills each id from these results with its source. Join legs of one trip with +, such as A3+B2, and Nod shows them as one itinerary with the total price.',
+    'Search live Google Flights fares and schedules. Each search is one way, or a round trip with returnDate. Put nearby airports in one search, and list up to six searches to compare dates or routes in one call. For a multi-city trip or stopover, search each leg; those are separate tickets. Use IATA codes, the conversation language code and the owner\'s currency. Prices are totals for all travellers with taxes, before bags and seat fees. Show options with send_message presentation {version:1,type:"flights",title,options:[{id,recommended?,label?}],pick?:{question}}; Nod fills each id from these results with its source. Join legs of one trip with +, such as A3+B2, and Nod shows them as one itinerary with the total price.',
     Type.Object(
       {
         searches: Type.Array(
@@ -298,7 +304,7 @@ export const toolDefinitions = {
   ),
   send_message: defineTool(
     'send_message',
-    'Deliver a checked result, necessary decision or task handoff now. A partial result must be useful on its own; finish related checks that could change its meaning. Use intent "final" only when this delivery completes the owner\'s request; it ends the turn. Use "handoff" only for a short acknowledgement right before starting a task. Omit intent or use "update" for partial results, then continue. Deliver results with their element in presentation: flight options or an itinerary → flights; places or locations → map; venues, stays, restaurants or a reservation → booking; numbers across items or over time → chart; a seat layout → seats; a process or relationship → diagram; an image you inspected → image; apps to connect, only when the owner asks for more ideas → apps. visual-replies has the field rules. Text states any detail the owner asked for, such as a code, amount or time, plus only missing context, caveats or sources; leave it empty only for a self-contained visual. End without delivery announcements or recaps. Background final text stays private. Completion requires confirmed, inspectable output.',
+    'Deliver a checked result, necessary decision or task handoff now. A partial result must be useful on its own; finish related checks that could change its meaning. Use intent "final" only when this delivery completes the owner\'s request; it ends the turn. Use "handoff" only for a short acknowledgement right before starting a task. Omit intent or use "update" for partial results, then continue. Deliver results with their element in presentation: options from the flights tool → its flight references; several emails, tasks, orders, applications, places, trips or other things → items; a day\'s events or plan → schedule; the details of one reservation, itinerary, order or account → facts; two to four options side by side, with amounts for numbers → compare; a seat layout → seats; a process or relationship → diagram; an image you inspected → image; apps to connect, only when the owner asks for more ideas → apps. When the owner must choose among the rows or columns of an items or compare card, add pick {question} rather than asking in text; Nod asks with them as answer choices and waits. visual-replies has the field rules. Text states any detail the owner asked for, such as a code, amount or time, plus only missing context, caveats or sources; leave it empty only for a self-contained visual. End without delivery announcements or recaps. Background final text stays private. Completion requires confirmed, inspectable output.',
     Type.Object({
       text: Type.String(),
       presentation: Type.Optional(presentation),
@@ -876,11 +882,11 @@ export function nodTools(
         return result;
       }),
     );
-    const { sources: _sources, asOf: _asOf, ...rest } = references.data;
+    const { sources: _sources, asOf: _asOf, pick, ...rest } = references.data;
     const cited = parts.flat();
     const sources = [...new Map(cited.map((leg) => [leg.source.url, leg.source])).values()];
     if (sources.length > 8) throw new Error('One flight card can cite at most eight searches.');
-    return {
+    const flights = presentationSchema.parse({
       version: 1,
       ...rest,
       options: references.data.options.map(({ recommended, label }, index) => {
@@ -912,7 +918,9 @@ export function nodTools(
       }),
       sources,
       asOf: cited[0]!.asOf(cited.map((leg) => leg.searchedAt).sort()[0]!),
-    };
+    });
+    if (flights.type !== 'flights') throw new Error('Flight references must build a flights list.');
+    return { ...flightItems(flights), ...(pick === undefined ? {} : { pick }) };
   };
   const { browserId } = turn.execution;
   const { signal } = context;
@@ -1122,6 +1130,18 @@ export function nodTools(
         none: 'The text answer is already visible to the owner.',
         original: 'The visual and accompanying text are already visible to the owner.',
       }[delivery.presentation];
+      const pick = visual && presentationPick(visual);
+      if (pick) {
+        await pause(
+          'question',
+          pick.question,
+          answerChoicesSchema.parse({
+            options: pick.choices.map((choice) => ({ ...choice, id: randomUUID() })),
+            multiple: pick.multiple ?? false,
+          }),
+        );
+        return { ...delivery, message: `${outcome} Waiting for the user to choose.` };
+      }
       return {
         ...delivery,
         message: `${outcome} If this completes the request, finish with no additional text. Continue only for substantive new results, caveats or remaining work; do not announce or recap delivery.`,

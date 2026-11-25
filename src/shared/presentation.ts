@@ -157,6 +157,135 @@ const scheduleRunPresentation = z.strictObject({
 });
 export type ScheduleRunPresentation = z.infer<typeof scheduleRunPresentation>;
 
+const fact = z.strictObject({ label: text(80), value: text(400) });
+const place = z.strictObject({
+  place: text(80),
+  time: text(40).optional(),
+  note: text(80).optional(),
+});
+const status = z.strictObject({
+  label: text(40),
+  tone: z
+    .enum(['new', 'waiting', 'done', 'failed'])
+    .describe(
+      'new for something needing the owner, waiting for an open request, done for settled, failed for blocked or refused.',
+    ),
+});
+const pick = z
+  .strictObject({ question: text(300), multiple: z.boolean().optional() })
+  .describe(
+    'Ask the owner to choose from this card. Each row (items) or column (compare) becomes an answer choice below it, and the turn waits for the answer.',
+  );
+const itemsPresentation = z.strictObject({
+  ...common,
+  type: z.literal('items'),
+  pick: pick.optional(),
+  label: text(80).optional(),
+  items: z
+    .array(
+      z.strictObject({
+        title: text(160),
+        sub: text(300).optional(),
+        status: status.optional(),
+        value: text(80).optional(),
+        valueSub: text(80).optional(),
+        route: z
+          .strictObject({
+            from: place,
+            to: place,
+            middle: z
+              .array(text(80))
+              .min(1)
+              .max(3)
+              .describe('Places the trip passes through, in order.')
+              .optional(),
+            stops: z
+              .array(
+                z.strictObject({ label: text(40), place: text(80), detail: text(160).optional() }),
+              )
+              .min(1)
+              .max(4)
+              .optional(),
+          })
+          .optional(),
+        warning: text(300).optional(),
+        location: z
+          .strictObject({
+            latitude: z.number().finite().min(-90).max(90),
+            longitude: z.number().finite().min(-180).max(180),
+          })
+          .describe('Verified coordinates. When every item has one, the card shows them as pins.')
+          .optional(),
+        detail: text(1000).optional(),
+        facts: z.array(fact).min(1).max(12).optional(),
+        url: url.optional(),
+      }),
+    )
+    .min(1)
+    .max(20),
+  note: text(400).optional(),
+});
+const schedulePresentation = z.strictObject({
+  ...common,
+  type: z.literal('schedule'),
+  items: z
+    .array(
+      z.strictObject({
+        start: text(40),
+        end: text(40).optional(),
+        title: text(160),
+        detail: text(300).optional(),
+        quiet: z.boolean().describe('Free time, travel or a tentative block.').optional(),
+        clash: z.boolean().describe('Overlaps another item.').optional(),
+      }),
+    )
+    .min(1)
+    .max(24),
+  note: text(400).optional(),
+});
+const factsPresentation = z.strictObject({
+  ...common,
+  type: z.literal('facts'),
+  status: status
+    .describe('Only a state the evidence establishes, such as Confirmed or Pending.')
+    .optional(),
+  items: z
+    .array(fact.extend({ strong: z.boolean().describe('A total or the key figure.').optional() }))
+    .min(1)
+    .max(20),
+  note: text(400).optional(),
+});
+const comparePresentation = z.strictObject({
+  ...common,
+  type: z.literal('compare'),
+  pick: pick.optional(),
+  columns: z.array(text(80)).min(2).max(4),
+  rows: z
+    .array(
+      z.strictObject({
+        label: text(80),
+        values: z.array(text(120)).min(2).max(4),
+        best: z
+          .number()
+          .int()
+          .min(0)
+          .max(3)
+          .describe('Column index of the better value.')
+          .optional(),
+        amounts: z
+          .array(z.number().finite().min(0).max(1e12))
+          .min(2)
+          .max(4)
+          .describe('The values as numbers, to draw bars; one per column.')
+          .optional(),
+      }),
+    )
+    .min(1)
+    .max(12),
+  verdict: text(400).optional(),
+  note: text(400).optional(),
+});
+
 export const bugReportReplyHint =
   'Reply "send" to share this summary with the Nod team, or ignore it. To add a diagnostic report, send it from Nod on your computer.';
 
@@ -267,6 +396,10 @@ export const presentationSchema = z
         .max(20),
       edges: z.array(z.strictObject({ from: id, to: id, label: text(120).optional() })).max(32),
     }),
+    itemsPresentation,
+    schedulePresentation,
+    factsPresentation,
+    comparePresentation,
     bugReportPresentation,
     scheduleRunPresentation,
   ])
@@ -356,6 +489,15 @@ export const presentationSchema = z
           invalid('A pie or donut chart must contain a positive value.');
       }
     }
+    if (value.type === 'compare')
+      for (const row of value.rows) {
+        if (row.values.length !== value.columns.length)
+          invalid('Each compare row needs one value per column.');
+        if (row.amounts && row.amounts.length !== value.columns.length)
+          invalid('Compare amounts need one number per column.');
+        if (row.best !== undefined && row.best >= value.columns.length)
+          invalid('The best value must point to a column.');
+      }
     if (value.type === 'diagram') {
       const nodes = value.nodes.map((node) => node.id);
       if (!unique(nodes)) invalid('Diagram node IDs must be unique.');
@@ -364,28 +506,187 @@ export const presentationSchema = z
     }
   });
 
+const notWrittenByPi = new Set([
+  'flights',
+  'map',
+  'booking',
+  'chart',
+  'bug-report',
+  'schedule-run',
+]);
+
 export const presentationInputSchema = z
   .discriminatedUnion('type', [
-    flightsPresentation.extend({
-      options: z
-        .array(
-          flightsPresentation.shape.options.element.extend({
-            status: flightsPresentation.shape.options.element.shape.status.unwrap(),
-          }),
-        )
-        .min(1)
-        .max(8),
-    }),
+    itemsPresentation,
     ...presentationSchema.options.filter(
-      (schema) =>
-        schema !== flightsPresentation &&
-        schema !== bugReportPresentation &&
-        schema !== scheduleRunPresentation,
+      (schema) => schema !== itemsPresentation && !notWrittenByPi.has(schema.shape.type.value),
     ),
   ])
-  .pipe(presentationSchema);
+  .pipe(presentationSchema)
+  .refine((value) => !('pick' in value && value.pick) || pickLabels(value).length <= 6, {
+    message: 'A card to pick from holds at most six rows. Show the best six.',
+  });
+
+function pickLabels(value: Presentation) {
+  if (value.type === 'compare') return value.columns.map((label) => ({ label }));
+  if (value.type === 'items')
+    return value.items.map((item) => {
+      const times =
+        item.route?.from.time && item.route.to.time
+          ? `${item.route.from.time} → ${item.route.to.time}`
+          : undefined;
+      const description = [times, item.value, item.sub].filter(Boolean).join(' · ');
+      return {
+        label: clip(item.title, 120),
+        ...(description ? { description: clip(description, 400) } : {}),
+      };
+    });
+  return [];
+}
+
+export function presentationPick(value: Presentation) {
+  return (value.type === 'items' || value.type === 'compare') && value.pick
+    ? { ...value.pick, choices: pickLabels(value) }
+    : undefined;
+}
 
 export type Presentation = z.infer<typeof presentationSchema>;
+type FlightsPresentation = z.infer<typeof flightsPresentation>;
+type ItemsPresentation = z.infer<typeof itemsPresentation>;
+type FlightSegment = FlightsPresentation['options'][number]['journeys'][number]['segments'][number];
+
+const clip = (value: string, length: number) =>
+  value.length > length ? `${value.slice(0, length - 1)}…` : value;
+const changes = (count: number) => `${count} change${count === 1 ? '' : 's'}`;
+const airportCode = (airport: string) => airport.match(/\(([A-Z]{3})\)\s*$/)?.[1] ?? airport;
+const legFacts = (segment: FlightSegment) => {
+  const connection = segment.connectionAfter;
+  const arrival = airportCode(segment.arrival.airport);
+  return [
+    {
+      label: segment.flightNumber ?? segment.airline,
+      value: [
+        `${airportCode(segment.departure.airport)} ${segment.departure.time} → ${arrival} ${segment.arrival.time}`,
+        segment.duration,
+      ]
+        .filter(Boolean)
+        .join(' · '),
+    },
+    ...(segment.technicalStops ?? []).map((stop) => ({
+      label: `Technical stop ${airportCode(stop.airport)}`,
+      value: stop.duration ?? 'Duration not given',
+    })),
+    ...(connection
+      ? [
+          {
+            label: `Change at ${arrival}`,
+            value:
+              [
+                connection.duration,
+                connection.airportChange === 'unknown' ? 'airport change unknown' : undefined,
+                connection.selfTransfer === 'unknown' ? 'self-transfer unknown' : undefined,
+              ]
+                .filter(Boolean)
+                .join(' · ') || 'Duration not given',
+          },
+        ]
+      : []),
+  ];
+};
+const flightRisks = (segment: FlightSegment) => [
+  ...(segment.connectionAfter?.airportChange === 'yes'
+    ? [`Airport change at ${segment.arrival.airport}`]
+    : []),
+  ...(segment.connectionAfter?.selfTransfer === 'yes'
+    ? [`Self-transfer at ${segment.arrival.airport}`]
+    : []),
+];
+const stop = (place: FlightSegment['departure']) => ({
+  place: clip(place.airport, 80),
+  time: clip(place.time, 40),
+  ...(place.date ? { note: clip(place.date, 80) } : {}),
+});
+
+export function flightItems(value: FlightsPresentation): ItemsPresentation {
+  return {
+    version: 1,
+    type: 'items',
+    title: value.title,
+    ...(value.caption ? { caption: value.caption } : {}),
+    sources: value.sources,
+    ...(value.asOf ? { asOf: value.asOf } : {}),
+    items: value.options.map((option) => {
+      const segments = option.journeys[0]!.segments;
+      const first = segments[0]!;
+      const last = segments.at(-1)!;
+      const connections = segments.slice(0, -1);
+      const risks = option.journeys.flatMap((journey) =>
+        journey.segments
+          .slice(0, -1)
+          .flatMap(flightRisks)
+          .map((risk) => (option.journeys.length > 1 ? `${journey.label}: ${risk}` : risk)),
+      );
+      const facts = [
+        ...option.journeys.flatMap((journey) => [
+          {
+            label: journey.label,
+            value:
+              [
+                journey.duration,
+                journey.segments.length > 1 && changes(journey.segments.length - 1),
+              ]
+                .filter(Boolean)
+                .join(' · ') || 'One flight',
+          },
+          ...journey.segments.flatMap(legFacts),
+        ]),
+        ...(option.bookingReference
+          ? [{ label: 'Booking reference', value: option.bookingReference }]
+          : []),
+        ...(option.baggage ? [{ label: 'Baggage', value: option.baggage }] : []),
+      ]
+        .slice(0, 12)
+        .map((fact) => ({ label: clip(fact.label, 80), value: clip(fact.value, 400) }));
+      const sub = [option.recommended ? 'Recommended' : undefined, option.label]
+        .filter(Boolean)
+        .join(' · ');
+      return {
+        title: clip(
+          [
+            ...new Set(
+              option.journeys.flatMap((journey) => journey.segments.map((s) => s.airline)),
+            ),
+          ].join(' + '),
+          160,
+        ),
+        ...(sub ? { sub: clip(sub, 300) } : {}),
+        ...(option.status === 'booked'
+          ? { status: { label: 'Booked', tone: 'done' as const } }
+          : {}),
+        ...(option.price ? { value: option.price } : {}),
+        ...(connections.length
+          ? { valueSub: changes(connections.length) }
+          : first.technicalStops?.length === 0
+            ? { valueSub: 'Nonstop' }
+            : {}),
+        route: {
+          from: stop(first.departure),
+          to: stop(last.arrival),
+          ...(connections.length
+            ? {
+                middle: connections
+                  .slice(0, 3)
+                  .map((segment) => clip(airportCode(segment.arrival.airport), 80)),
+              }
+            : {}),
+        },
+        ...(risks.length ? { warning: clip(risks.join('. '), 300) } : {}),
+        facts,
+        ...(option.url ? { url: option.url } : {}),
+      };
+    }),
+  };
+}
 
 export function presentationImages(
   value: Presentation,
@@ -584,6 +885,58 @@ export function presentationText(value: Presentation) {
         `${series.label}: ${series.points.map((point) => `${point.label}: ${point.value}${value.unit ? ` ${value.unit}` : ''}`).join('; ')}`,
       );
   }
+  if (value.type === 'items') {
+    if (value.label) lines.push(value.label);
+    for (const item of value.items) {
+      lines.push(
+        [
+          item.title,
+          item.status?.label,
+          item.sub,
+          [item.value, item.valueSub].filter(Boolean).join(' '),
+          item.route &&
+            [
+              `${[item.route.from.time, item.route.from.place].filter(Boolean).join(' ')} → ${[item.route.to.time, item.route.to.place, item.route.to.note].filter(Boolean).join(' ')}`,
+              item.route.middle && `via ${item.route.middle.join(', ')}`,
+            ]
+              .filter(Boolean)
+              .join(' '),
+          item.location && mapLocationUrl(item.location),
+          item.url,
+        ]
+          .filter(Boolean)
+          .join(' · '),
+      );
+      for (const stop of item.route?.stops ?? [])
+        lines.push([stop.label, stop.place, stop.detail].filter(Boolean).join(' · '));
+      if (item.warning) lines.push(item.warning);
+      if (item.detail) lines.push(item.detail);
+      for (const fact of item.facts ?? []) lines.push(`${fact.label}: ${fact.value}`);
+    }
+  }
+  if (value.type === 'schedule') {
+    for (const item of value.items)
+      lines.push(
+        [
+          [item.start, item.end].filter(Boolean).join('–'),
+          item.title,
+          item.detail,
+          item.clash ? 'Clash' : undefined,
+        ]
+          .filter(Boolean)
+          .join(' · '),
+      );
+  }
+  if (value.type === 'facts') {
+    if (value.status) lines.push(value.status.label);
+    for (const item of value.items) lines.push(`${item.label}: ${item.value}`);
+  }
+  if (value.type === 'compare') {
+    lines.push(value.columns.join(' | '));
+    for (const row of value.rows) lines.push(`${row.label}: ${row.values.join(' | ')}`);
+    if (value.verdict) lines.push(value.verdict);
+  }
+  if ('note' in value && value.note) lines.push(value.note);
   if (value.type === 'diagram') {
     let labels = new Map(
       value.nodes.map((node) => [

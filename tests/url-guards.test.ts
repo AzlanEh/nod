@@ -1,5 +1,6 @@
 import {
   flightJourneySummary,
+  flightItems,
   presentationImages,
   presentationInputSchema,
   presentationSchema,
@@ -1111,8 +1112,66 @@ test('flight journeys preserve every leg and distinguish connections from techni
   assert.equal(presentationInputSchema.safeParse(parsed).success, false);
   for (const status of ['booked', 'option', 'unknown'] as const) {
     const classified: Presentation = { ...parsed, options: [{ ...option, status }] };
-    assert.deepEqual(presentationInputSchema.parse(classified), classified);
+    assert.deepEqual(presentationSchema.parse(classified), classified);
+    assert.equal(presentationInputSchema.safeParse(classified).success, false);
   }
+  const items = presentationInputSchema.parse(
+    flightItems({ ...parsed, options: [{ ...option, status: 'booked' }] }),
+  );
+  if (items.type !== 'items') throw new Error('Expected an items presentation.');
+  const row = items.items[0]!;
+  assert.equal(row.status?.label, 'Booked');
+  assert.equal(row.route?.from.place, 'LIS');
+  assert.equal(row.route?.to.place, 'BKK');
+  assert.deepEqual(row.route?.middle, ['LHR', 'DXB']);
+  assert.match(row.warning ?? '', /Airport change at LHR/);
+  assert.match(row.warning ?? '', /Self-transfer at LHR/);
+  const legs = JSON.stringify(row.facts);
+  for (const detail of [
+    'ND123',
+    'SA12',
+    'LGW',
+    'DXB',
+    'Return',
+    'One cabin bag',
+    '34h 45m',
+    'Technical stop DOH',
+    '45m',
+    'Change at LHR',
+    '11h 50m',
+    'self-transfer unknown',
+  ])
+    assert.ok(legs.includes(detail), detail);
+  const returnLeg = flightItems({
+    ...parsed,
+    options: [
+      {
+        ...option,
+        journeys: [
+          { ...option.journeys[0]!, segments: [option.journeys[0]!.segments[2]!] },
+          {
+            id: 'return',
+            label: 'Return',
+            segments: [
+              {
+                airline: 'Marketing Air',
+                departure: { airport: 'BKK', time: '12:00' },
+                arrival: { airport: 'IST', time: '18:00' },
+                connectionAfter: { airportChange: 'no', selfTransfer: 'yes' },
+              },
+              {
+                airline: 'Second Air',
+                departure: { airport: 'IST', time: '21:00' },
+                arrival: { airport: 'LIS', time: '23:30' },
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  }).items[0]!;
+  assert.match(returnLeg.warning ?? '', /Return: Self-transfer at IST/);
+  assert.match(presentationText(items), /LIS → 08:00 BKK .*via LHR, DXB/);
   const booked = presentationSchema.parse({
     ...parsed,
     options: [{ ...option, status: 'booked', bookingReference: 'SYNTH42', price: undefined }],
