@@ -46,7 +46,6 @@ import {
   systemPrompt,
 } from './prompt.ts';
 import { untrustedBlock } from '../shared/untrusted.ts';
-import { repeatsTaskStart } from '../shared/task-ack.ts';
 import { currentUserTime, localResultTimes } from './time-context.ts';
 import { connectedTools, mcpNamespaces, nodTools } from './tools.ts';
 import type { ReplyDelivery, Turn } from './turn.ts';
@@ -313,13 +312,16 @@ export function createAgentRuntime(dependencies: {
     let streamedText = '';
     let streamSubmitted = false;
     let speakNext = !context.taskContext;
-    let replyOwed = false;
+    let owed: string[] = [];
+    let owedRefused = false;
+    let spoke = false;
+    let spokeTo: string | undefined;
     let answered = false;
     let lastNote = '';
     let reported = false;
     let finalDelivered = false;
     let requestRevision = 0;
-    let taskStart: { revision: number; message: string; previousReply: string } | undefined;
+    let taskStartRevision: number | undefined;
     const activeToolCalls = new Set<Promise<unknown>>();
     const observe = (event: RuntimeObservation) => {
       if (signal.aborted && !(event.type === 'tool_end' && event.status === 'cancelled')) return;
@@ -366,12 +368,31 @@ export function createAgentRuntime(dependencies: {
       lastPresentation = visual;
       if (id) persistedStreams.add(id);
       lastReply = trimmed;
-      replyOwed = false;
       return { delivered: true, presentation: outcome };
     };
     const reply = deliverReply;
+    const answerFirst = () => {
+      if (!owed.length || owedRefused || !speaks) return;
+      owedRefused = true;
+      throw new Error(
+        "Not run, and no question was asked: the owner's latest messages have no answer yet. Answer them in text now, then call this again.",
+      );
+    };
+    let unreadRefused = -1;
+    const readFirst = async () => {
+      if (!speaks || unreadRefused === requestRevision || !context.hasQueuedMessages) return;
+      if (!(await context.hasQueuedMessages())) return;
+      unreadRefused = requestRevision;
+      throw new Error(
+        'Not run, and no question was asked: the owner sent new messages you have not read yet. They follow this result; read them, then ask only if you still need to.',
+      );
+    };
     let handoffBrowserId: string | undefined;
     const pause: Turn['pause'] = async (reason, message, choices) => {
+      if (reason === 'question') {
+        answerFirst();
+        await readFirst();
+      }
       if (browsed) {
         const hold = computer.hold(browserId, true);
         if (reason === 'browser') await hold;
@@ -395,17 +416,21 @@ export function createAgentRuntime(dependencies: {
 
     const flushText = () => {
       if (bufferedText && !stopped && speaks) {
-        if ((speakNext || replyOwed) && (taskStart?.revision !== requestRevision || replyOwed))
+        if ((speakNext || owed.length) && (taskStartRevision !== requestRevision || owed.length))
           context.delta(bufferedText, (streamId ??= randomUUID()));
         streamedText += bufferedText;
       }
       bufferedText = '';
     };
-    const queueStreamReply = (text: string, id: string) => {
+    const queueStreamReply = (text: string, id: string, replyToMessageId?: string) => {
       streamSubmitted = true;
+      if (!context.taskContext) {
+        spoke = true;
+        spokeTo = replyToMessageId;
+      }
       pendingReplies = pendingReplies
         .then(async () => {
-          await reply(text, id);
+          await reply(text, id, replyToMessageId);
         })
         .finally(() => {
           if (!persistedStreams.delete(id)) context.delta('', id, true);
@@ -607,12 +632,11 @@ export function createAgentRuntime(dependencies: {
             (name === 'task' && (params as { action?: unknown } | null)?.action === 'start')
           )
             reported = true;
-          if (name === 'task' && (params as { action?: unknown } | null)?.action === 'start')
-            taskStart = {
-              revision,
-              message: String((params as { message?: unknown }).message ?? ''),
-              previousReply: lastReply,
-            };
+          if (name === 'task' && (params as { action?: unknown } | null)?.action === 'start') {
+            taskStartRevision = revision;
+            const request = (params as { request?: unknown }).request;
+            owed = owed.filter((owedId) => owedId !== request);
+          }
           const { commandOutput: fullOutput, ...toolResult } = isToolResult(output)
             ? output
             : textResult(output);
@@ -782,6 +806,10 @@ export function createAgentRuntime(dependencies: {
         const gate = {
           asked: false,
           admit: async (asks: boolean, read = false) => {
+            if (asks) {
+              answerFirst();
+              await readFirst();
+            }
             if (!asks) decide(false);
             if (!read && (await earlier))
               throw new Error(
@@ -857,6 +885,7 @@ export function createAgentRuntime(dependencies: {
               ...(tool.companions ? { companions: tool.companions } : {}),
               ...(deferred ? { deferred } : {}),
               parallel: Boolean(deferred) || parallelTools.has(name),
+              ...(name === 'send_message' ? { early: true } : {}),
               execute: async (params, options) => {
                 assertActive();
                 if (browserTools.has(name)) await take();
@@ -952,7 +981,21 @@ export function createAgentRuntime(dependencies: {
           presentation?: Presentation,
           handoff?: boolean,
         ) => {
-          return reply(text, id, replyToMessageId, presentation, handoff);
+          const chat = !context.taskContext && !handoff;
+          const first = chat && !spoke;
+          const target = replyToMessageId ?? (chat && !first ? owed.at(-1) : undefined);
+          const delivery = await reply(text, id, target, presentation, handoff);
+          if (delivery.delivered && chat) {
+            spoke = true;
+            spokeTo = target;
+          }
+          if (delivery.delivered && !handoff)
+            owed = replyToMessageId
+              ? owed.filter((owedId) => owedId !== replyToMessageId)
+              : first
+                ? owed
+                : [];
+          return delivery;
         },
         pause,
         checkInCost: () =>
@@ -1184,7 +1227,8 @@ export function createAgentRuntime(dependencies: {
               finalDelivered = false;
               context.memoryBrief = undefined;
               checkInSpent = checkInPlan = checkInStrikes = 0;
-              replyOwed = true;
+              owed = [...owed, ...incoming.map((message) => message.id)];
+              owedRefused = false;
             }
             for (const message of incoming) {
               const { images, omitted, analysis } = await inline(
@@ -1265,10 +1309,14 @@ export function createAgentRuntime(dependencies: {
               !modelError &&
               (event.status === undefined || event.status === 'succeeded')
             ) {
-              if (speakNext || replyOwed) {
-                queueStreamReply(text, streamId ?? randomUUID());
+              if (speakNext || owed.length) {
+                queueStreamReply(
+                  text,
+                  streamId ?? randomUUID(),
+                  context.taskContext || !spoke ? undefined : owed.at(-1),
+                );
                 lastNote = '';
-                replyOwed = false;
+                owed = [];
               } else {
                 lastNote = text;
                 const step = (dependencies.redactError ?? String)(text.split('\n')[0]!).replace(
@@ -1305,14 +1353,7 @@ export function createAgentRuntime(dependencies: {
             pendingReplies = pendingReplies.then(() =>
               context.emit('final', '', { execution }).catch(() => {}),
             );
-            if (
-              taskStart?.revision === requestRevision &&
-              !replyOwed &&
-              [taskStart.message, taskStart.previousReply].some((message) =>
-                repeatsTaskStart(event.text, message),
-              )
-            )
-              streamSubmitted = true;
+            if (taskStartRevision === requestRevision && !owed.length) streamSubmitted = true;
             else queueStreamReply(event.text, streamId ?? randomUUID());
           }
         },
@@ -1417,6 +1458,7 @@ export function createAgentRuntime(dependencies: {
         ...(answer ? { completed: answer } : {}),
         ...(waitingFor ? { waitingFor } : {}),
         ...(waitingMessage ? { message: waitingMessage } : {}),
+        ...(waitingMessage && spokeTo ? { replyToMessageId: spokeTo } : {}),
         ...(answerChoices ? { answerChoices } : {}),
         ...(handoffBrowserId ? { handoffBrowserId } : {}),
       };

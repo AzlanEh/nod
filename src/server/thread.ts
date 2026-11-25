@@ -79,6 +79,7 @@ import { lockKey } from './locks.ts';
 import { redactSecretText } from './redaction.ts';
 import { loadConversationLanguage } from './communication.ts';
 import { resemblesTaskAcknowledgement } from '../shared/task-ack.ts';
+import type { QuickReplyInput } from './activity.ts';
 
 const queue = 'thread-drain';
 const rasterTypes = new Set([
@@ -96,6 +97,7 @@ export const boss = new PgBoss({
 });
 const running = new Map<string, AbortController>();
 const inflight = new Set<Promise<void>>();
+const quickReplying = new Set<string>();
 let stopping = false;
 let nextStop = new AbortController();
 let chatStop = new AbortController();
@@ -189,6 +191,7 @@ export interface ThreadDependencies {
     input: { text: string; question?: string },
     signal: AbortSignal,
   ) => Promise<string>;
+  quickReply?: (turnId: string, input: QuickReplyInput, signal: AbortSignal) => Promise<string>;
   consumers?: WorkConsumers;
   artifacts?: ArtifactService;
   writeArtifact?: (
@@ -470,7 +473,7 @@ export async function insertAssistantMessage(
   text: string,
   attachments: Artifact[] = [],
   streamId?: string,
-  replyToMessageId?: string,
+  replyToMessageId?: string | null,
   presentation?: Presentation,
   answerChoices?: AnswerChoices,
   analytics?: CaptureAnalytics,
@@ -520,18 +523,19 @@ export async function insertAssistantMessage(
       });
     attachments = [...attached.values()];
   }
-  replyToMessageId ??=
-    turn.taskMessageId ??
-    (
-      await client.query<{ id: string }>(
-        `SELECT a.id FROM (SELECT id,created_at FROM messages WHERE owner_id=$1 AND thread_id=$2 AND turn_id=$3
-           AND role='user' ORDER BY created_at DESC,id DESC LIMIT 1) a
+  if (replyToMessageId === undefined)
+    replyToMessageId =
+      turn.taskMessageId ??
+      (
+        await client.query<{ id: string }>(
+          `SELECT a.id FROM (SELECT id,created_at FROM messages WHERE owner_id=$1 AND thread_id=$2 AND turn_id=$3
+           AND role='user' ORDER BY created_at,id LIMIT 1) a
          WHERE EXISTS (SELECT 1 FROM messages m WHERE m.owner_id=$1 AND m.thread_id=$2
-           AND (m.created_at,m.id)>(a.created_at,a.id) AND m.turn_id IS DISTINCT FROM $3)`,
-        [ownerId, turn.threadId, turn.turnId],
-      )
-    ).rows[0]?.id;
-  await assertReplyTarget(client, turn.threadId, replyToMessageId);
+           AND (m.created_at,m.id)>(a.created_at,a.id) AND (m.turn_id IS DISTINCT FROM $3 OR m.role='user'))`,
+          [ownerId, turn.threadId, turn.turnId],
+        )
+      ).rows[0]?.id;
+  await assertReplyTarget(client, turn.threadId, replyToMessageId ?? undefined);
   const id = randomUUID();
   await client.query(
     'INSERT INTO messages(id,owner_id,role,text,thread_id,turn_id,attachments,stream_id,reply_to_message_id,presentation,answer_choices) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)',
@@ -1796,15 +1800,12 @@ async function takeQueuedMessages(turnId: string, sessionId: string, channel: st
       [thread.id, ownerId, turnId, sessionId],
     );
     if (!rows.some((row) => row.id === turnId && row.status === 'running')) throw turnStopped();
-    const next = rows.find((row) => row.status === 'queued');
-    if (
-      !next ||
-      !['user', 'task'].includes(next.source) ||
-      next.channel !== channel ||
-      !next.message_id
-    )
-      return [];
-    const taken = [next];
+    const queued = rows.filter((row) => row.status === 'queued');
+    const end = queued.findIndex(
+      (row) => !['user', 'task'].includes(row.source) || row.channel !== channel || !row.message_id,
+    );
+    const taken = end < 0 ? queued : queued.slice(0, end);
+    if (!taken.length) return [];
     const ids = taken.map((row) => row.id);
     await client.query(
       'UPDATE messages SET turn_id=$1 WHERE turn_id=ANY($2::uuid[]) AND owner_id=$3',
@@ -1822,8 +1823,135 @@ async function takeQueuedMessages(turnId: string, sessionId: string, channel: st
           [row.task_id, row.task_revision, ownerId, ids, turnId],
         );
     }
-    return taken.map((row) => ({ id: row.message_id as string, text: row.prompt as string }));
+    return taken.map((row) => ({
+      id: row.message_id as string,
+      text: row.prompt as string,
+    }));
   }, pool);
+}
+
+async function hasQueuedMessages(sessionId: string, channel: string) {
+  const { rows } = await pool.query<{ source: string; channel: string; message_id: string | null }>(
+    `SELECT u.source,u.channel,u.message_id FROM turns u
+     WHERE u.owner_id=$1 AND u.session_id=$2 AND u.status='queued'
+     ORDER BY u.created_at,u.id LIMIT 1`,
+    [ownerId, sessionId],
+  );
+  const next = rows[0];
+  return Boolean(
+    next && ['user', 'task'].includes(next.source) && next.channel === channel && next.message_id,
+  );
+}
+
+async function quickReplies(
+  threadId: string,
+  write: NonNullable<ThreadDependencies['quickReply']>,
+) {
+  const { rows } = await pool.query<{
+    id: string;
+    message_id: string;
+    running_id: string;
+    running_prompt: string;
+  }>(
+    `SELECT q.id,q.message_id,r.id AS running_id,r.prompt AS running_prompt
+     FROM turns q JOIN turns r ON r.owner_id=q.owner_id AND r.thread_id=q.thread_id AND r.session_id=q.session_id
+       AND r.status='running' AND r.channel=q.channel AND NOT r.background
+     WHERE q.owner_id=$1 AND q.thread_id=$2 AND q.session_id=$2 AND q.channel='web' AND q.status='queued' AND q.source='user'
+       AND COALESCE(q.source_id,'') NOT LIKE 'reaction-reply:%'
+       AND q.message_id IS NOT NULL AND btrim(q.prompt)<>''
+       AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.owner_id=q.owner_id AND m.stream_id='quick:'||q.message_id)
+     ORDER BY q.created_at,q.id`,
+    [ownerId, threadId],
+  );
+  await Promise.all(
+    rows.map(async (row) => {
+      if (quickReplying.has(row.id)) return;
+      quickReplying.add(row.id);
+      try {
+        const stop = running.get(row.running_id)?.signal;
+        if (!stop || stop.aborted) return;
+        const text = (
+          await write(
+            row.running_id,
+            await quickReplyInput(threadId, row),
+            AbortSignal.any([stop, AbortSignal.timeout(15_000)]),
+          )
+        ).trim();
+        if (!text || stop.aborted) return;
+        const streamId = `quick:${row.message_id}`;
+        const posted = await transaction(async (client) => {
+          await lockThread(client);
+          const open = await client.query(
+            `SELECT 1 FROM turns q JOIN turns r ON r.id=$3 AND r.owner_id=q.owner_id AND r.status='running'
+             WHERE q.id=$1 AND q.owner_id=$2 AND q.status='queued'
+               AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.owner_id=q.owner_id AND m.stream_id=$4)`,
+            [row.id, ownerId, row.running_id, streamId],
+          );
+          if (!open.rowCount) return false;
+          await insertAssistantMessage(
+            client,
+            { threadId, turnId: row.running_id },
+            text,
+            [],
+            streamId,
+            null,
+          );
+          return true;
+        }, pool);
+        if (posted) refresh();
+      } finally {
+        quickReplying.delete(row.id);
+      }
+    }),
+  );
+}
+
+async function quickReplyInput(
+  threadId: string,
+  row: { message_id: string; running_id: string; running_prompt: string },
+): Promise<QuickReplyInput> {
+  const [message, conversation, step, tasks, approvals] = await Promise.all([
+    pool.query<{ text: string }>('SELECT text FROM messages WHERE id=$1 AND owner_id=$2', [
+      row.message_id,
+      ownerId,
+    ]),
+    pool.query<{ role: string; text: string }>(
+      `SELECT role,text FROM (SELECT m.role,m.text,m.created_at,m.id FROM messages m JOIN threads th ON th.id=m.thread_id
+         WHERE m.owner_id=$1 AND m.thread_id=$2 AND m.hidden_at IS NULL AND m.approval_answer IS NULL
+           AND m.id<>$3 AND btrim(m.text)<>'' AND m.created_at>COALESCE(th.chat_restarted_at,'-infinity')
+           AND m.created_at<=(SELECT created_at FROM messages WHERE id=$3 AND owner_id=$1)
+         ORDER BY m.created_at DESC,m.id DESC LIMIT 12) m ORDER BY created_at,id`,
+      [ownerId, threadId, row.message_id],
+    ),
+    pool.query<{ summary: string }>(
+      `SELECT summary FROM turn_events WHERE turn_id=$1 AND type IN ('intent','step') AND btrim(summary)<>''
+         ORDER BY created_at DESC,id DESC LIMIT 1`,
+      [row.running_id],
+    ),
+    pool.query<{ title: string; state: string; now: string }>(
+      `SELECT title,state,now_text AS now FROM tasks WHERE owner_id=$1
+         AND (state='open' OR updated_at>now()-interval '24 hours') ORDER BY created_at DESC,id DESC LIMIT 10`,
+      [ownerId],
+    ),
+    pool.query<{ title: string; status: string }>(
+      `SELECT COALESCE(title,action) AS title,status FROM approvals
+         WHERE owner_id=$1 AND thread_id=$2 AND created_at>now()-interval '24 hours'
+         ORDER BY created_at DESC,id DESC LIMIT 10`,
+      [ownerId, threadId],
+    ),
+  ]);
+  const now = step.rows[0]?.summary;
+  return {
+    message: message.rows[0]?.text ?? '',
+    conversation: conversation.rows,
+    working: now ? `${row.running_prompt}\nNow: ${now}` : row.running_prompt,
+    tasks: tasks.rows.map(({ title, state, now }) => ({
+      title,
+      state,
+      ...(state === 'open' && now.trim() ? { now } : {}),
+    })),
+    approvals: approvals.rows,
+  };
 }
 
 async function drainThread(threadId: string, dependencies: ThreadDependencies) {
@@ -1834,6 +1962,13 @@ async function drainThread(threadId: string, dependencies: ThreadDependencies) {
   });
   const claimed = await claimTurns(threadId);
   if (claimed.length) refresh();
+  if (dependencies.quickReply) {
+    const work = quickReplies(threadId, dependencies.quickReply).catch((error) =>
+      logFailure('quick_reply_failed', error, { threadId }),
+    );
+    inflight.add(work);
+    void work.finally(() => inflight.delete(work));
+  }
   for (const turn of claimed) {
     const execute = () => executeTurn(turn, dependencies);
     const work = (
@@ -1925,6 +2060,7 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
     confirmedActions,
     restarted,
     language,
+    approvals,
   ] = await Promise.all([
     loadMessage(sourceMessageId),
     pool.query(
@@ -1938,6 +2074,7 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
        LEFT JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id
        WHERE m.owner_id=$1 AND m.thread_id=$2 AND m.hidden_at IS NULL AND m.id IS DISTINCT FROM $3::uuid
        AND m.approval_answer IS NULL AND NOT (m.role='user' AND ${withdrawnSql('m')})
+       AND NOT (m.role='user' AND u.status='queued')
        AND ($6::uuid<>$2::uuid OR m.created_at>COALESCE(th.chat_restarted_at,'-infinity'))
        AND (NOT $5::boolean OR (m.created_at<=boundary.at AND
          (u.id IS NULL OR u.session_id=$6
@@ -1970,6 +2107,12 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
         )
       : undefined,
     loadConversationLanguage(pool, ownerId, threadId),
+    pool.query<{ title: string; status: string; createdAt: Date }>(
+      `SELECT COALESCE(title,action) AS title,status,created_at AS "createdAt" FROM approvals
+         WHERE owner_id=$1 AND thread_id=$2 AND created_at>now()-interval '24 hours'
+         ORDER BY created_at DESC,id DESC LIMIT 10`,
+      [ownerId, threadId],
+    ),
   ]);
   const preference = preferences.rows[0];
   const historyTurnIds = [
@@ -2019,6 +2162,15 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
           }
         : {}),
       ...(confirmedActions?.length ? { confirmedActions } : {}),
+      ...(approvals.rows.length
+        ? {
+            approvals: approvals.rows.map(({ title, status, createdAt }) => ({
+              title,
+              status,
+              createdAt: createdAt.toISOString(),
+            })),
+          }
+        : {}),
       ...(credentialRequests.length ? { credentialRequests } : {}),
       ...(related.length ? { relatedConversation: related } : {}),
       conversationLanguage: language,
@@ -2640,6 +2792,10 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
               }
               return messages;
             },
+      hasQueuedMessages:
+        turn.background && !taskContext
+          ? undefined
+          : () => hasQueuedMessages(turn.session_id, turn.channel),
       createAudio: async (text) => {
         explicitAudio = true;
         const audio = await fenced(() => dependencies.speech.synthesize(text, signal))();
@@ -2796,7 +2952,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
           result.message,
           shared.splice(0),
           undefined,
-          undefined,
+          result.replyToMessageId,
           undefined,
           answerChoices,
           dependencies.analytics,

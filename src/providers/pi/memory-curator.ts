@@ -166,7 +166,11 @@ export function createPiMemoryCurator(options: {
           }
         }
       const traceTurnId = crypto.randomUUID();
-      const bounded = task === 'classify' || task === 'attention' || task === 'activity';
+      const bounded =
+        task === 'classify' ||
+        task === 'attention' ||
+        task === 'activity' ||
+        task === 'quick-reply';
       const turnBound =
         signal !== undefined && ['review', 'access', 'skill', 'remember'].includes(task);
       if (options.resolve) loaded = undefined;
@@ -336,7 +340,10 @@ export function createPiMemoryCurator(options: {
         const label =
           task === 'vision'
             ? 'The image model is unavailable.'
-            : task === 'classify' || task === 'attention' || task === 'activity'
+            : task === 'classify' ||
+                task === 'attention' ||
+                task === 'activity' ||
+                task === 'quick-reply'
               ? 'The classification model is unavailable.'
               : task === 'review' || task === 'access'
                 ? 'The action review model is unavailable.'

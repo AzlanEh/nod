@@ -169,6 +169,7 @@ export interface RuntimeContext {
   previousFailure?: string;
   withdrawnRequest?: 'stopped' | 'failed';
   confirmedActions?: string[];
+  approvals?: Array<{ title: string; status: string; createdAt: string }>;
   credentialRequests?: Array<
     Pick<CredentialRequest, 'turnId' | 'origin' | 'label' | 'kind' | 'status' | 'notEntered'>
   >;
@@ -275,11 +276,13 @@ export interface RuntimeContext {
       attachments: RuntimeContext['attachments'];
     }>
   >;
+  hasQueuedMessages?(): Promise<boolean>;
 }
 export interface RuntimeResult {
   status: 'succeeded' | 'waiting_credentials' | 'waiting_user';
   waitingFor?: 'question' | 'approval' | 'credentials';
   message?: string;
+  replyToMessageId?: string;
   answerChoices?: AnswerChoices;
   handoffBrowserId?: string;
   result?: string;
@@ -308,6 +311,7 @@ export interface AgentToolMetadata {
 }
 export interface AgentTool extends AgentToolMetadata {
   parallel?: boolean;
+  early?: boolean;
   execute(args: Record<string, unknown>, options?: { nested?: boolean }): Promise<AgentToolResult>;
 }
 export interface SkillLibrary {

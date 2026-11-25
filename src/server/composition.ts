@@ -232,7 +232,12 @@ import {
 import type { VaultActivityReason } from '../shared/contracts.ts';
 import { createTriage, getPreferences } from './triage.ts';
 import { createTasks } from './tasks.ts';
-import { createActivity, createActivityLine } from './activity.ts';
+import {
+  createActivity,
+  createActivityLine,
+  createQuickReply,
+  type QuickReplyInput,
+} from './activity.ts';
 import {
   checkedKeyStore,
   createVault,
@@ -2473,6 +2478,14 @@ async function initializeApplication(
                 input: { text: string; question?: string },
                 signal: AbortSignal,
               ) => ledger.withTurn(turnId, () => line(input, signal));
+            })(),
+            quickReply: (() => {
+              const reply = createQuickReply(
+                ledger.curator(adapters.classificationCurator),
+                createTextRedactor(secrets),
+              );
+              return (turnId: string, input: QuickReplyInput, signal: AbortSignal) =>
+                ledger.withTurn(turnId, () => reply(input, signal));
             })(),
           }
         : {}),

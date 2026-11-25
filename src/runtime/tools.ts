@@ -1408,7 +1408,7 @@ export function nodTools(
         ? {
             ...(result as object),
             message:
-              'The task has started and its start message is already visible. Do not add another acknowledgement. The task now does this work in its own session and reports its result. End the turn unless another request still needs an answer.',
+              'The task has started and its start message is already visible. The task now does this work in its own session and reports its result. Text you write after this is not shown: if another request still needs an answer, send it with send_message, otherwise end the turn.',
           }
         : result;
     }),

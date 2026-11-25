@@ -2979,6 +2979,16 @@ test('a turn posts its opening line and final reply, shows the lines between as 
         ['Reading the synthetic comments.'],
       ],
       [
+        'Summarize the synthetic comments while the owner steers in chat',
+        undefined,
+        [
+          'Reading the synthetic comments.',
+          'Found three synthetic threads.\nAll of them mention pricing.',
+          'The synthetic summary is ready.',
+        ],
+        [],
+      ],
+      [
         'Summarize the synthetic comments while the owner steers quietly',
         task,
         [
@@ -2995,8 +3005,10 @@ test('a turn posts its opening line and final reply, shows the lines between as 
       ],
     ] as const) {
       const posted: string[] = [];
+      const postedTargets: Array<string | undefined> = [];
       const events: Array<[string, string]> = [];
       let steered = false;
+      const steeredId = randomUUID();
       continued = [];
       const result = await runtime.runTurn({
         ...context(directory),
@@ -3009,18 +3021,22 @@ test('a turn posts its opening line and final reply, shows the lines between as 
                 steered
                   ? []
                   : ((steered = true),
-                    [{ id: randomUUID(), text: 'Also count them', attachments: [] }]),
+                    [{ id: steeredId, text: 'Also count them', attachments: [] }]),
             }
           : {}),
         emit: async (type, summary) => {
           events.push([type, summary]);
         },
-        reply: async (text) => {
+        reply: async (text, _id, replyToMessageId) => {
           posted.push(text);
+          postedTargets.push(replyToMessageId);
         },
       });
       assert.equal(result.status, 'succeeded');
       assert.deepEqual(posted, replies);
+      if (/in chat/.test(prompt))
+        assert.deepEqual(postedTargets, [undefined, steeredId, undefined]);
+      if (taskContext) assert.ok(postedTargets.every((target) => target === undefined));
       assert.deepEqual(
         events.filter(([type]) => type === 'step').map(([, summary]) => summary),
         steps,
@@ -3044,7 +3060,155 @@ test('a turn posts its opening line and final reply, shows the lines between as 
   }
 });
 
-test('task handoff does not repeat acknowledgements and keeps independent final answers and steered requests', async (t) => {
+test('a question waits until a message sent mid-turn has its answer', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'nod-answer-first-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const steeredId = randomUUID();
+  const asks: string[] = [];
+  const runtime = createAgentRuntime({
+    agent: {
+      open: async (input) => ({
+        resumed: false,
+        abort() {},
+        dispose() {},
+        prompt: async () => {
+          input.onEvent({ type: 'message_start' });
+          input.onEvent({ type: 'text_delta', text: 'Drafting the synthetic email.' });
+          input.onEvent({ type: 'message_end', status: 'succeeded' });
+          await input.nextMessages!();
+          await input.tools
+            .find((tool) => tool.name === 'send_message')!
+            .execute({ text: 'Starting the synthetic task.', intent: 'handoff' });
+          const ask = input.tools.find((tool) => tool.name === 'ask_user')!;
+          const question = { question: 'Which synthetic address?' };
+          asks.push(String(await ask.execute(question).catch((error) => error.message)));
+          input.onEvent({ type: 'message_start' });
+          input.onEvent({ type: 'text_delta', text: 'It is 391.' });
+          input.onEvent({ type: 'message_end', status: 'succeeded' });
+          asks.push(JSON.stringify(await ask.execute(question)));
+        },
+      }),
+      dispose() {},
+    },
+    computer: fakeComputer(),
+    workspace: fakeWorkspace(),
+  });
+  t.after(() => runtime.dispose());
+  const posted: Array<[string, string | undefined]> = [];
+  let taken = false;
+  const result = await runtime.runTurn({
+    ...context(directory),
+    turnId: randomUUID(),
+    prompt: 'Draft the synthetic email',
+    takeMessages: async () =>
+      taken
+        ? []
+        : ((taken = true), [{ id: steeredId, text: 'What is 17 times 23?', attachments: [] }]),
+    reply: async (text, _id, replyToMessageId) => {
+      posted.push([text, replyToMessageId]);
+    },
+  });
+  assert.match(asks[0]!, /Not run, and no question was asked/);
+  assert.match(asks[1]!, /Waiting for the user to reply/);
+  assert.deepEqual(posted, [
+    ['Drafting the synthetic email.', undefined],
+    ['Starting the synthetic task.', undefined],
+    ['It is 391.', steeredId],
+  ]);
+  assert.equal(result.status, 'waiting_user');
+  assert.equal(result.replyToMessageId, steeredId);
+});
+
+test('a question waits until messages queued during the step are read', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'nod-read-first-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const steeredId = randomUUID();
+  const asks: string[] = [];
+  let queued = true;
+  const runtime = createAgentRuntime({
+    agent: {
+      open: async (input) => ({
+        resumed: false,
+        abort() {},
+        dispose() {},
+        prompt: async () => {
+          const ask = input.tools.find((tool) => tool.name === 'ask_user')!;
+          const question = { question: 'Which synthetic sweets?' };
+          asks.push(String(await ask.execute(question).catch((error) => error.message)));
+          await input.nextMessages!();
+          await input.tools
+            .find((tool) => tool.name === 'send_message')!
+            .execute({ text: 'Synthetic sweets noted.', replyToMessageId: steeredId });
+          asks.push(JSON.stringify(await ask.execute(question)));
+        },
+      }),
+      dispose() {},
+    },
+    computer: fakeComputer(),
+    workspace: fakeWorkspace(),
+  });
+  t.after(() => runtime.dispose());
+  const result = await runtime.runTurn({
+    ...context(directory),
+    turnId: randomUUID(),
+    prompt: 'Buy synthetic sweets',
+    hasQueuedMessages: async () => queued,
+    takeMessages: async () =>
+      queued
+        ? ((queued = false), [{ id: steeredId, text: 'Synthetic brand', attachments: [] }])
+        : [],
+    reply: async () => {},
+  });
+  assert.match(asks[0]!, /new messages you have not read yet/);
+  assert.match(asks[1]!, /Waiting for the user to reply/);
+  assert.equal(result.status, 'waiting_user');
+});
+
+test("a turn's first answer stays on its own request when a message arrives before it", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'nod-own-answer-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const steeredId = randomUUID();
+  const runtime = createAgentRuntime({
+    agent: {
+      open: async (input) => ({
+        resumed: false,
+        abort() {},
+        dispose() {},
+        prompt: async () => {
+          await input.nextMessages!();
+          const send = input.tools.find((tool) => tool.name === 'send_message')!;
+          await send.execute({ text: 'The synthetic flight leaves at nine.' });
+          await send.execute({ text: 'The synthetic café is next door.' });
+        },
+      }),
+      dispose() {},
+    },
+    computer: fakeComputer(),
+    workspace: fakeWorkspace(),
+  });
+  t.after(() => runtime.dispose());
+  const posted: Array<[string, string | undefined]> = [];
+  let taken = false;
+  await runtime.runTurn({
+    ...context(directory),
+    turnId: randomUUID(),
+    prompt: 'Find the next synthetic flight',
+    takeMessages: async () =>
+      taken
+        ? []
+        : ((taken = true),
+          [{ id: steeredId, text: 'Where is the synthetic café?', attachments: [] }]),
+    reply: async (text, _id, replyToMessageId) => {
+      posted.push([text, replyToMessageId]);
+    },
+  });
+  assert.deepEqual(posted, [
+    ['The synthetic flight leaves at nine.', undefined],
+    ['The synthetic café is next door.', steeredId],
+  ]);
+});
+
+test('task handoff shows only the start message unless a steered request needs an answer', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'nod-task-handoff-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const acknowledgement =
@@ -3061,84 +3225,11 @@ test('task handoff does not repeat acknowledgements and keeps independent final 
       expected: [acknowledgement],
     },
     {
-      name: 'task start alone',
+      name: 'reworded closing text',
       earlyUpdate: false,
       steer: false,
-      final:
-        "I've started reviewing your synthetic inbox. I'll flag urgent email and save draft replies. Nothing gets sent without your OK.",
+      final: 'I restarted the synthetic inbox review and will report back when it is done.',
       expected: [],
-    },
-    {
-      name: 'Spanish task start alone',
-      earlyUpdate: false,
-      steer: false,
-      start:
-        'Ya he empezado a revisar tu buzón y preparar borradores de respuesta. No enviaré nada sin tu aprobación.',
-      final:
-        'Ya he empezado a revisar tu buzón y preparando borradores de respuesta. No enviaré nada sin tu aprobación.',
-      expected: [],
-    },
-    {
-      name: 'independent answer',
-      earlyUpdate: true,
-      steer: false,
-      final: 'The synthetic invoice is due Friday for €450. I flagged it for review.',
-      expected: [
-        acknowledgement,
-        'The synthetic invoice is due Friday for €450. I flagged it for review.',
-      ],
-    },
-    {
-      name: 'new finding after the task starts',
-      earlyUpdate: true,
-      steer: false,
-      final:
-        "I've started reviewing your synthetic inbox. I'll flag urgent email and save draft replies. Nothing gets sent without your OK. I found 3 urgent messages.",
-      expected: [
-        acknowledgement,
-        "I've started reviewing your synthetic inbox. I'll flag urgent email and save draft replies. Nothing gets sent without your OK. I found 3 urgent messages.",
-      ],
-    },
-    {
-      name: 'negated finding after task start',
-      earlyUpdate: false,
-      steer: false,
-      start: "I've started checking the synthetic invoices. Every invoice is approved.",
-      final: "I've started checking the synthetic invoices. Every invoice is not approved.",
-      expected: ["I've started checking the synthetic invoices. Every invoice is not approved."],
-    },
-    {
-      name: 'removed negation after task start',
-      earlyUpdate: false,
-      steer: false,
-      start: "I've started checking the synthetic invoices. No invoice is approved.",
-      final: "I've started checking the synthetic invoices. Every invoice is approved.",
-      expected: ["I've started checking the synthetic invoices. Every invoice is approved."],
-    },
-    {
-      name: 'changed count after task start',
-      earlyUpdate: false,
-      steer: false,
-      start: "I've started checking all 12 synthetic invoices for overdue items.",
-      final: "I've started checking all 2 synthetic invoices for overdue items.",
-      expected: ["I've started checking all 2 synthetic invoices for overdue items."],
-    },
-    {
-      name: 'qualitative finding after task start',
-      earlyUpdate: false,
-      steer: false,
-      start: "I've started reviewing your synthetic inbox and will flag urgent messages.",
-      final: "I've started reviewing your synthetic inbox and will flag fraudulent messages.",
-      expected: ["I've started reviewing your synthetic inbox and will flag fraudulent messages."],
-    },
-    {
-      name: 'finding borrowed from the owner request',
-      earlyUpdate: false,
-      steer: false,
-      prompt: 'Check the synthetic invoices and tell me which are rejected.',
-      start: "I've started checking the synthetic invoices. Every invoice is approved.",
-      final: "I've started checking the synthetic invoices. Every invoice is rejected.",
-      expected: ["I've started checking the synthetic invoices. Every invoice is rejected."],
     },
     {
       name: 'steered answer',
@@ -3162,11 +3253,21 @@ test('task handoff does not repeat acknowledgements and keeps independent final 
         "I've started reviewing your synthetic Gmail inbox. I'll flag urgent email and save draft replies. Nothing gets sent without your OK.",
       ],
     },
+    {
+      name: 'steered request that starts its own task',
+      earlyUpdate: false,
+      steer: true,
+      steerBefore: true,
+      startsSteered: true,
+      final: 'I started two synthetic jobs and each reports back when done.',
+      expected: [],
+    },
   ] as const;
   for (const scenario of cases)
     await t.test(scenario.name, async () => {
       const posted: string[] = [];
       const incoming: string[] = [];
+      const steeredId = randomUUID();
       const runtime = createAgentRuntime({
         agent: {
           open: async (input) => ({
@@ -3187,7 +3288,8 @@ test('task handoff does not repeat acknowledgements and keeps independent final 
                   title: 'Review synthetic inbox',
                   doneWhen: 'Urgent messages identified and draft replies saved',
                   now: 'Reviewing synthetic inbox',
-                  message: 'start' in scenario ? scenario.start : startMessage,
+                  message: startMessage,
+                  ...('startsSteered' in scenario ? { request: steeredId } : {}),
                 });
               if (!('steerBefore' in scenario && scenario.steerBefore))
                 incoming.push(...((await input.nextMessages?.()) ?? []).map((item) => item.text));
@@ -3207,10 +3309,7 @@ test('task handoff does not repeat acknowledgements and keeps independent final 
         const result = await runtime.runTurn({
           ...context(directory),
           turnId: randomUUID(),
-          prompt:
-            'prompt' in scenario
-              ? scenario.prompt
-              : 'Review my synthetic inbox and report urgent messages.',
+          prompt: 'Review my synthetic inbox and report urgent messages.',
           task: async () => ({ id: randomUUID() }),
           reply: async (text) => {
             posted.push(text);
@@ -3223,7 +3322,7 @@ test('task handoff does not repeat acknowledgements and keeps independent final 
                     : ((steered = true),
                       [
                         {
-                          id: randomUUID(),
+                          id: steeredId,
                           text: 'Use the synthetic account I selected.',
                           attachments: [],
                         },
@@ -8208,6 +8307,135 @@ test('the live line shows a model retry and the text before a tool call while th
   assert.equal(requests, 4);
   assert.equal(exposedTools.has('set_status'), false);
   assert.ok(emitted.find(([type]) => type === 'retry')?.[1].includes(definition.choice.name));
+});
+
+test('a chat answer posts as soon as its call is written, before the rest of the step streams', async (t) => {
+  const { createServer } = await import('node:http');
+  const directory = await mkdtemp(join(tmpdir(), 'nod-pi-early-reply-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  let replied!: () => void;
+  const posted = new Promise<'reply'>((resolve) => (replied = () => resolve('reply')));
+  let released: 'reply' | 'timeout' | undefined;
+  let requests = 0;
+  const server = createServer((request, response) => {
+    request.resume();
+    request.on('end', async () => {
+      const send = (...events: Array<Record<string, unknown>>) =>
+        response.write(
+          events
+            .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+            .join(''),
+        );
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+      send({
+        type: 'message_start',
+        message: {
+          id: `synthetic-early-${++requests}`,
+          type: 'message',
+          role: 'assistant',
+          model: 'fixture-anthropic',
+          content: [],
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 10, output_tokens: 0 },
+        },
+      });
+      const tool = (index: number, id: string, name: string, input: object) => [
+        {
+          type: 'content_block_start',
+          index,
+          content_block: { type: 'tool_use', id, name, input: {} },
+        },
+        {
+          type: 'content_block_delta',
+          index,
+          delta: { type: 'input_json_delta', partial_json: JSON.stringify(input) },
+        },
+        { type: 'content_block_stop', index },
+      ];
+      const end = (reason: string) => {
+        send(
+          {
+            type: 'message_delta',
+            delta: { stop_reason: reason, stop_sequence: null },
+            usage: { output_tokens: 2 },
+          },
+          { type: 'message_stop' },
+        );
+        response.end();
+      };
+      if (requests > 1) {
+        send(
+          { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+          {
+            type: 'content_block_delta',
+            index: 0,
+            delta: { type: 'text_delta', text: 'The plan is saved.' },
+          },
+          { type: 'content_block_stop', index: 0 },
+        );
+        return end('end_turn');
+      }
+      send(
+        ...tool(0, 'toolu_answer', 'send_message', {
+          text: 'There are 604,800 seconds in a week.',
+        }),
+      );
+      let timer: ReturnType<typeof globalThis.setTimeout> | undefined;
+      released = await Promise.race([
+        posted,
+        new Promise<'timeout'>(
+          (resolve) => (timer = globalThis.setTimeout(() => resolve('timeout'), 5000)),
+        ),
+      ]);
+      clearTimeout(timer);
+      send(...tool(1, 'toolu_plan', 'bash', { command: 'fixture-write-plan' }));
+      end('tool_use');
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const url = 'http://127.0.0.1:' + (server.address() as import('node:net').AddressInfo).port;
+  const access = smallContextAccess('compatible', 'fixture-anthropic', 200_000);
+  access.provider = 'anthropic';
+  access.read = async () => ({ type: 'api_key', key: 'synthetic-key' });
+  access.definition.spec = {
+    ...access.definition.spec,
+    provider: 'anthropic',
+    api: 'anthropic-messages',
+    baseUrl: url,
+  };
+  const agent = createPiAgent({
+    provider: 'anthropic',
+    sessionRoot: join(directory, 'sessions'),
+    resolve: async () => access,
+  });
+  const { workspace, scripts } = recordingWorkspace();
+  const runtime = createAgentRuntime({
+    agent,
+    computer: fakeComputer(),
+    workspace: fakeWorkspace({ open: () => workspace }),
+  });
+  t.after(() => runtime.dispose());
+  const replies: string[] = [];
+  let writtenBeforeReply = true;
+  const result = await runtime.runTurn({
+    ...context(directory),
+    sessionId: 'fixture-early-reply',
+    turnId: randomUUID(),
+    prompt: 'Plan my mornings, and how many seconds are in a week?',
+    reply: async (text) => {
+      if (!replies.length)
+        writtenBeforeReply = scripts.some((script) => script.includes('fixture-write-plan'));
+      replies.push(text);
+      replied();
+    },
+  });
+  assert.equal(result.status, 'succeeded');
+  assert.equal(released, 'reply');
+  assert.equal(writtenBeforeReply, false);
+  assert.deepEqual(replies, ['There are 604,800 seconds in a week.', 'The plan is saved.']);
+  assert.equal(scripts.filter((script) => script.includes('fixture-write-plan')).length, 1);
 });
 
 test('OpenAI cache boundaries cover shared instructions and keep task paths outside them', async () => {

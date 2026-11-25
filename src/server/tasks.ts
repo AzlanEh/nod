@@ -568,7 +568,22 @@ export function createTasks(options: {
         ? null
         : prior && resemblesTaskAcknowledgement(prior.text, request.message, priorHandoff)
           ? prior.id
-          : await insertAssistantMessage(client, turn, request.message);
+          : await insertAssistantMessage(
+              client,
+              turn,
+              request.message,
+              [],
+              undefined,
+              sourceMessageId &&
+                (
+                  await client.query(
+                    `SELECT 1 FROM messages WHERE owner_id=$1 AND thread_id=$2 AND turn_id=$3 AND role='user' AND id<>$4`,
+                    [ownerId, turn.threadId, turn.turnId, sourceMessageId],
+                  )
+                ).rowCount
+                ? sourceMessageId
+                : undefined,
+            );
       const sessionId = independent ? id : current.session_id;
       await client.query(
         `INSERT INTO tasks(id,owner_id,turn_id,session_id,source_message_id,message_id,title,done_when,brief,now_text,steps,waiting_for,next_check,applied_revision,activity_key,model)

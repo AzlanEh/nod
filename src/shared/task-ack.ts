@@ -19,21 +19,6 @@ function overlap(text: string, start: string, shorter: number, longer: number, m
   );
 }
 
-function addsNewContent(text: string, start: string) {
-  const finalWords = words(text);
-  const startWords = words(start);
-  const removed = [...startWords].filter((word) => !finalWords.has(word));
-  return [...finalWords]
-    .filter((word) => !startWords.has(word))
-    .some(
-      (word) =>
-        !removed.some((old) => {
-          const stem = Math.min(word.length, old.length) - 2;
-          return stem >= 3 && word.slice(0, stem) === old.slice(0, stem);
-        }),
-    );
-}
-
 function nearDuplicate(text: string, start: string) {
   const normalize = (value: string) =>
     value
@@ -139,24 +124,5 @@ export function resemblesTaskAcknowledgement(text: string, start: string, handof
     !/[\p{N}€$£\n]|https?:\/\//iu.test(text) &&
     !conflictingPolarity(text, start) &&
     (status ? overlap(text, start, 0.45, 0.4, 3) : handoff && nearDuplicate(text, start))
-  );
-}
-
-export function repeatsTaskStart(text: string, start: string) {
-  const details = text.match(/https?:\/\/\S+|[€$£]\s*\d[\d.,]*|\b\d[\d.,]*\b/gu) ?? [];
-  const startDetails = new Map<string, number>();
-  for (const detail of start.match(/https?:\/\/\S+|[€$£]\s*\d[\d.,]*|\b\d[\d.,]*\b/gu) ?? [])
-    startDetails.set(detail, (startDetails.get(detail) ?? 0) + 1);
-  return (
-    !text.includes('\n') &&
-    details.every((detail) => {
-      const count = startDetails.get(detail) ?? 0;
-      if (!count) return false;
-      startDetails.set(detail, count - 1);
-      return true;
-    }) &&
-    polarity(text) === polarity(start) &&
-    !addsNewContent(text, start) &&
-    (overlap(text, start, 0.8, 0.85, 5) || nearDuplicate(text, start))
   );
 }

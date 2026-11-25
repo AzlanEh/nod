@@ -13,6 +13,7 @@ import {
   clampThinkingLevel,
   contentText,
   getCurrentTools,
+  validateToolArguments,
   type AssistantMessage,
   type ToolResultMessage,
 } from '@earendil-works/pi-ai';
@@ -42,7 +43,7 @@ import { audioContext, audioEntries, audioMessage, readsNativeAudio } from './au
 import { modelFailure, piModelTrace, recordPiModelCall } from './traces.ts';
 import type { ModelTraces } from '../../ports/traces.ts';
 import type { ModelAccess } from '../../ports/models.ts';
-import type { Agent, AgentEvent } from '../../ports/agent.ts';
+import type { Agent, AgentEvent, AgentToolResult } from '../../ports/agent.ts';
 import {
   closeInterruptedCalls,
   completeAssistantMessage,
@@ -651,6 +652,7 @@ export function createPiAgent(options: {
       };
       let idle = false;
       let activation: ExtensionAPI | undefined;
+      const early = new Map<string, Promise<AgentToolResult>>();
       const manager = ephemeral
         ? SessionManager.inMemory(directory)
         : openLocalSession(directory, input.contextRestart);
@@ -801,6 +803,8 @@ export function createPiAgent(options: {
             : { exposure: 'direct' as const }),
           executionMode: tool.parallel ? 'parallel' : 'sequential',
           execute: async (id, args, signal) => {
+            const started = early.get(id);
+            early.delete(id);
             const active = activation?.getActiveTools() ?? [];
             const companions =
               typeof tool.companions === 'function'
@@ -814,9 +818,10 @@ export function createPiAgent(options: {
               ...(await boundedOutput(
                 tool.name,
                 () =>
-                  tool
-                    .execute(args as Record<string, unknown>, { nested: id.includes('/') })
-                    .then((result) => ({ ...result, details: result.details ?? {} })),
+                  (
+                    started ??
+                    tool.execute(args as Record<string, unknown>, { nested: id.includes('/') })
+                  ).then((result) => ({ ...result, details: result.details ?? {} })),
                 signal,
                 id.includes('/'),
               )),
@@ -1233,6 +1238,28 @@ export function createPiAgent(options: {
           }
         return result ?? undefined;
       };
+      const startEarly = (message: AssistantMessage, index: number) => {
+        const call = message.content[index];
+        if (call?.type !== 'toolCall' || early.has(call.id)) return;
+        const tool = input.tools.find((item) => item.early && item.name === call.name);
+        const definition = tools.find((item) => item.name === call.name);
+        if (!tool || !definition || !activation?.getActiveTools().includes(call.name)) return;
+        if (
+          message.content
+            .slice(0, index)
+            .some((part) => part.type === 'toolCall' && !early.has(part.id))
+        )
+          return;
+        let args: Record<string, unknown>;
+        try {
+          args = structuredClone(validateToolArguments(definition, call));
+        } catch {
+          return;
+        }
+        const started = tool.execute(args, { nested: call.id.includes('/') });
+        started.catch(() => undefined);
+        early.set(call.id, started);
+      };
       let textBlock: number | undefined;
       let thinking = { index: -1, text: '', scanned: 0 };
       let contextExhausted = false;
@@ -1334,6 +1361,7 @@ export function createPiAgent(options: {
             }
             textBlock = update.contentIndex;
           }
+          if (update.type === 'toolcall_end') startEarly(update.partial, update.contentIndex);
           if (update.type === 'toolcall_start' && textBlock !== undefined) {
             input.onEvent({ type: 'message_end' });
             input.onEvent({ type: 'message_start' });
