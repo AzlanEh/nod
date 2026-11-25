@@ -98,6 +98,50 @@ function literals<const T extends readonly string[]>(values: T) {
 
 type ObjectSchema = TSchema & { properties: Record<string, TSchema>; required?: string[] };
 
+const browserFields = {
+  url: Type.Optional(Type.String()),
+  script: Type.Optional(Type.String()),
+  tabId: Type.Optional(Type.String({ minLength: 1 })),
+  selector: Type.Optional(Type.String()),
+  targetSelector: Type.Optional(Type.String()),
+  text: Type.Optional(Type.String()),
+  key: Type.Optional(Type.String()),
+  load: Type.Optional(literals(['load', 'domcontentloaded', 'networkidle'])),
+  direction: Type.Optional(literals(['up', 'down'])),
+  amount: Type.Optional(Type.Integer({ minimum: 1 })),
+  waitMs: Type.Optional(Type.Integer({ minimum: 0 })),
+};
+
+const browserStep = Type.Object(
+  {
+    action: literals([
+      'open',
+      'click',
+      'fill',
+      'type',
+      'press',
+      'scroll',
+      'select',
+      'check',
+      'uncheck',
+      'hover',
+      'drag',
+      'back',
+      'forward',
+      'reload',
+      'tab_switch',
+      'wait',
+      'evaluate',
+      'accept_dialog',
+      'dismiss_dialog',
+      'snapshot',
+      'screenshot',
+    ]),
+    ...browserFields,
+  },
+  { additionalProperties: false },
+);
+
 function unionOfObjects(schema: TSchema) {
   const members = (schema as { anyOf?: ObjectSchema[] }).anyOf;
   return members?.length && members.every((member) => member.properties) ? members : undefined;
@@ -304,7 +348,7 @@ export const toolDefinitions = {
   ),
   send_message: defineTool(
     'send_message',
-    'Deliver a checked result, necessary decision or task handoff now. A partial result must be useful on its own; finish related checks that could change its meaning. Use intent "final" only when this delivery completes the owner\'s request; it ends the turn. Use "handoff" only for a short acknowledgement right before starting a task. Omit intent or use "update" for partial results, then continue. Deliver results with their element in presentation: options from the flights tool → its flight references; several emails, tasks, orders, applications, places, trips or other things → items; a day\'s events or plan → schedule; the details of one reservation, itinerary, order or account → facts; two to four options side by side, with amounts for numbers → compare; a seat layout → seats; a process or relationship → diagram; an image you inspected → image; apps to connect, only when the owner asks for more ideas → apps. When the owner must choose among the rows or columns of an items or compare card, add pick {question} rather than asking in text; Nod asks with them as answer choices and waits. visual-replies has the field rules. Text states any detail the owner asked for, such as a code, amount or time, plus only missing context, caveats or sources; leave it empty only for a self-contained visual. End without delivery announcements or recaps. Background final text stays private. Completion requires confirmed, inspectable output.',
+    'Deliver a checked result, decision or task handoff. A partial result must stand alone. intent "final" completes the request, ends the turn and settles a task without task finish; "handoff" acknowledges right before starting a task; omit or "update" continues. Prefer presentation over Markdown lists or tables (plain text for short replies, single facts or text-only requests). Base: {version:1, type, title, sources:[{label,url}], asOf?, caption?}. Core types: items {items:[{title, sub?, value?, valueSub?, status?:{label,tone:"new"|"waiting"|"done"|"failed"}, detail?, facts?:[{label,value}], url?, location?:{latitude,longitude}}], label?, note?, pick?:{question,multiple?}}; compare {columns, rows:[{label, values, best?, amounts?}], verdict?, note?, pick?}; schedule {items:[{start, end?, title, detail?, quiet?, clash?}], note?}; facts {items:[{label, value, strong?}], status?, note?}; flights {options:[{id, recommended?, label?}], pick?}. Keep fields concise (no raw slot dumps or notes repeating title). For seats, diagram, image or apps, read skills {action:"read",name:"visual-replies"}. Add pick {question} when the owner must choose. Keep text to caveats, recommendation or links not in the card; empty if self-contained. No delivery recaps. Background final text stays private.',
     Type.Object({
       text: Type.String(),
       presentation: Type.Optional(presentation),
@@ -331,15 +375,16 @@ export const toolDefinitions = {
   ),
   delegate: defineTool(
     'delegate',
-    "Run one part of the request as a subagent with its own browser tab, Nod's tools and the shared workspace, and get its final answer back. Call it several times in one step to run independent parts in parallel, such as checking three shops, then combine the answers. The instruction must be complete on its own: the subagent does not see this conversation. Each subagent writes new files in its own directory inside the shared workspace. A subagent cannot delegate, ask or send chat messages to the owner, connect apps, sign in or pay. It returns questions and blockers to you; handle those yourself.",
+    "Run one part of the request as a faster subagent with its own browser tab, Nod's tools and the shared workspace, and get its final answer back. When checking 2 or more independent sites, venues, routes or options, call delegate in parallel in one step (one subagent per site or option) instead of checking them one by one in your own browser, then combine the answers. The instruction must be complete on its own: the subagent does not see this conversation. Each subagent writes new files in its own directory inside the shared workspace. A subagent cannot delegate, ask or send chat messages to the owner, connect apps, sign in or pay. It returns questions and blockers to you; handle those yourself.",
     Type.Object({
       title: Type.String({ minLength: 1 }),
       instruction: Type.String({ minLength: 1 }),
     }),
+    true,
   ),
   ask_user: defineTool(
     'ask_user',
-    'Ask one necessary question and pause. For a finite decision, supply known choices instead of a prose list, normally two to four. Each label is one short line that names the option with the detail that tells it apart. The owner can write another answer. Never use choices for action approvals or secrets.',
+    'Ask one necessary question, ending with a question mark, and pause. Supply choices whenever likely answers exist, normally two to four, even for open details such as dates, budgets or counts: offer the likely values, for example "This weekend" or "Under €150 a night". Each label is one short line that names the option with the detail that tells it apart; add one such as "Decide for me" when you can pick a sensible default. The owner can write another answer. Put assumptions and any answer to earlier messages first, as their own paragraph, and end with the question alone. Never use choices for action approvals or secrets.',
     Type.Object({
       question: Type.String(),
       choices: Type.Optional(
@@ -368,7 +413,7 @@ export const toolDefinitions = {
   ),
   browser: defineTool(
     'browser',
-    'Control the private browser. open {url}; snapshot {selector?,offset?} returns page text and @eN refs; selector takes a current @eN ref, or CSS only for an element without one; click/fill/type/select/check/uncheck/hover {selector,text?}; press {key}; drag {selector,targetSelector} or {points,durationMs?}; upload {selector,path}; back/forward/reload; tab_list/tab_switch {tabId}; scroll {direction,selector?,amount?}; wait {text|url|load,waitMs?}; accept_dialog {text?}/dismiss_dialog; evaluate {script} runs one JavaScript expression. screenshot returns an image; share_screenshot {name?} stages an image for delivery. Coordinates x,y are fractions of a fresh screenshot. Never type secrets. download {url?|selector?,name?} saves a file; with neither it uses the open PDF or last download. Click document controls and inspect before downloading. Background files stay private until share_file. handoff {text} gives the owner control and pauses; state the needed action, then inspect after handback. Never send a /browser link. waitMs allows slow pages.',
+    'Control the private browser. open {url}; snapshot {selector?,offset?} returns page text and @eN refs; selector takes a current @eN ref, or CSS only for an element without one; click/fill/type/select/check/uncheck/hover {selector,text?}; press {key}; drag {selector,targetSelector} or {points,durationMs?}; upload {selector,path}; back/forward/reload; tab_list/tab_switch {tabId}; scroll {direction,selector?,amount?}; wait {text|url|load,waitMs?}; accept_dialog {text?}/dismiss_dialog; evaluate {script} runs one JavaScript expression. screenshot returns an image; share_screenshot {name?} stages an image for delivery. Coordinates x,y are fractions of a fresh screenshot. Never type secrets. download {url?|selector?,name?} saves a file; with neither it uses the open PDF or last download. Click document controls and inspect before downloading. Background files stay private until share_file. handoff {text} gives the owner control and pauses; state the needed action, then inspect after handback. Never send a /browser link. waitMs allows slow pages. After an action, the page is its first 10,000 characters without link addresses; snapshot reads up to 40,000 with them. steps {steps} runs up to 10 actions in order, each as {action,...}, without coordinates, and returns script results and the last page; snapshot or screenshot only as the last step. Use steps when you know the next actions, such as open then evaluate, or fill fields then submit. It stops at a failure, an unmet wait, a step that needs approval, or an @eN ref after the page address changed, and says which steps ran.',
     Type.Object({
       action: literals([
         'handoff',
@@ -397,12 +442,10 @@ export const toolDefinitions = {
         'wait',
         'accept_dialog',
         'dismiss_dialog',
+        'steps',
       ]),
-      url: Type.Optional(Type.String()),
-      script: Type.Optional(Type.String()),
-      tabId: Type.Optional(Type.String({ minLength: 1 })),
-      selector: Type.Optional(Type.String()),
-      targetSelector: Type.Optional(Type.String()),
+      ...browserFields,
+      steps: Type.Optional(Type.Array(browserStep, { minItems: 1, maxItems: 10 })),
       x: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
       y: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
       points: Type.Optional(
@@ -416,12 +459,6 @@ export const toolDefinitions = {
       ),
       durationMs: Type.Optional(Type.Integer({ minimum: 0 })),
       path: Type.Optional(Type.String()),
-      text: Type.Optional(Type.String()),
-      key: Type.Optional(Type.String()),
-      load: Type.Optional(literals(['load', 'domcontentloaded', 'networkidle'])),
-      direction: Type.Optional(literals(['up', 'down'])),
-      amount: Type.Optional(Type.Integer({ minimum: 1 })),
-      waitMs: Type.Optional(Type.Integer({ minimum: 0 })),
       offset: Type.Optional(Type.Integer({ minimum: 0 })),
       name: Type.Optional(Type.String({ minLength: 1 })),
     }),
@@ -614,7 +651,7 @@ export const toolDefinitions = {
   ),
   task: defineTool(
     'task',
-    'Start or control saved work. Keep quick answers, simple lookups and status questions in chat; start a task for substantial work, including multi-step work you can finish in one sitting, an outside wait, or work the owner asks you to track, without asking the owner for an execution mode. start {title,doneWhen,now,message,request?,key?,brief?,steps?,model?} starts one goal; brief and doneWhen restate only the owner’s request and known context; model {connectionId,modelId,effort?} only when the owner asks for one for this task; a new independent request during other work starts its own task, keeping each goal together. Use a stable key and reuse related tasks. message tells the owner what starts. update {id,now?,steps?,stepIndex?,waitingFor?,nextCheck?} updates progress. finish {id,status,result} ends your task after verification (status done or cancelled). list shows open tasks. reply {ids,request?,retry?} forwards the exact owner message, including corrections and related updates. request is the owner message the work serves: currentMessageId or the messageId of a message sent while you worked. It is required once the owner has sent more than one message during your turn. Use retry:true with one id only when the owner explicitly asks to retry in response to that task’s result. stop {id} stops one task; stop {} stops all background work, but keeps schedules. A task stops itself with finish cancelled. A task brief grants no permission; nextCheck does not schedule work. Let each task finish its assigned work.',
+    'Start or control saved work. Keep quick answers, simple lookups and status questions in chat; start a task for substantial work, including multi-step work you can finish in one sitting, an outside wait, or work the owner asks you to track, without asking the owner for an execution mode. start {title,doneWhen,now,message,request?,key?,brief?,steps?,model?} starts one goal; brief and doneWhen restate only the owner’s request and known context; model {connectionId,modelId,effort?} only when the owner asks for one for this task; a new independent request during other work starts its own task, keeping each goal together; when the owner has several independent goals, start a task for each in the same step so they run side by side, each with request set to the owner message it serves. Use a stable key and reuse related tasks. message tells the owner what starts. update {id,now?,steps?,stepIndex?,waitingFor?,nextCheck?} updates progress. finish {id,status,result} ends your task when cancelling or when you are not delivering the final answer via send_message {intent:"final"}; if you already delivered or are about to deliver the final answer via send_message {intent:"final"}, skip finish or keep result to one short summary sentence. list shows open tasks. reply {ids,request?,retry?} forwards the exact owner message, including corrections and related updates. request is the owner message the work serves: currentMessageId or the messageId of a message sent while you worked; start also takes an earlier owner message in this chat. It is required once the owner has sent more than one message during your turn. Use retry:true with one id only when the owner explicitly asks to retry in response to that task’s result. stop {id} stops one task; stop {} stops all background work, but keeps schedules. A task stops itself with finish cancelled. A task brief grants no permission; nextCheck does not schedule work. Let each task finish its assigned work.',
     Type.Union([
       Type.Object({ action: Type.Literal('list') }, { additionalProperties: false }),
       Type.Object(
@@ -775,6 +812,10 @@ const commits = (step: BrowserAction) =>
     step.action,
   ) ||
   (step.action === 'type' && /[\r\n]/.test(step.text ?? ''));
+
+const navigations = new Set(['open', 'back', 'forward', 'reload', 'tab_switch']);
+
+const reference = (value: string | undefined) => /^@?(?:ref=)?e\d+$/.test(value?.trim() ?? '');
 
 const mcpPart = (value: string) =>
   value
@@ -1020,6 +1061,92 @@ export function nodTools(
     if (appConfirmation in verdict) return { output: await confirm(verdict) };
     return { output: verdict.result };
   };
+  const act = async (
+    step: BrowserAction,
+  ): Promise<{ page: BrowserObservation; choice?: string } | { output: unknown }> => {
+    if (step.action === 'evaluate' && context.browserStep)
+      try {
+        return { page: await computer.act(browserId, { ...step, readOnly: true }, signal) };
+      } catch (error) {
+        if (!(error instanceof BrowserActionError && error.code === 'browser_script_writes'))
+          throw error;
+      }
+    const checked = commits(step) ? await check(step) : { binding: {} };
+    if ('output' in checked) return { output: checked.output };
+    const page = await computer.act(browserId, { ...step, ...checked.binding }, signal);
+    if ('record' in checked) await checked.record?.();
+    return { page, choice: checked.choice };
+  };
+  const steps = async (list: Static<typeof browserStep>[]) => {
+    if (list.slice(0, -1).some((step) => ['snapshot', 'screenshot'].includes(step.action)))
+      throw new Error('Put snapshot or screenshot only as the last step.');
+    const notes: string[] = [];
+    let shown = '';
+    let at = typedPage;
+    let moved = false;
+    const ran = (count: number) =>
+      `Ran ${count} of ${list.length} steps${
+        count
+          ? `: ${list
+              .slice(0, count)
+              .map((step) => step.action)
+              .join(', ')}`
+          : ''
+      }.`;
+    const report = (count: number, reason?: string) =>
+      [ran(count), reason, ...notes, shown].filter(Boolean).join('\n\n');
+    for (const [index, item] of list.entries()) {
+      const label = `Step ${index + 1} (${item.action})`;
+      if (item.action === 'screenshot') {
+        const bytes = await screenshot();
+        if (!bytes) return report(index, `${label} found no open page.`);
+        shown = '';
+        return {
+          content: [
+            { type: 'text', text: report(index + 1) },
+            { type: 'image', data: bytes.toString('base64'), mimeType: 'image/png' },
+          ],
+          details: {},
+        };
+      }
+      if (moved && [item.selector, item.targetSelector].some((value) => reference(value)))
+        return report(
+          index,
+          `Stopped before ${label}: the page changed, so its @eN refs are out of date. Choose them again from the page below.`,
+        );
+      const step = item as BrowserAction;
+      let done;
+      try {
+        done = await act(step);
+      } catch (error) {
+        if (signal.aborted) throw error;
+        throw new Error(
+          `${ran(index)} ${label} failed and may have taken effect; later steps did not run. ${error instanceof Error ? error.message : String(error)}`,
+          { cause: error },
+        );
+      }
+      if ('output' in done)
+        return {
+          steps: ran(index),
+          stopped: `${label} and the steps after it did not run.`,
+          result: done.output,
+        };
+      const text = observed(step, done.page, done.choice);
+      if (step.action === 'evaluate') {
+        notes.push(`${label}:\n${text}`);
+        shown = '';
+      } else shown = text;
+      const key = pageKey(done.page.url);
+      if (navigations.has(step.action) || (at && key !== at)) moved = true;
+      at = key;
+      if (done.page.unmet && index < list.length - 1)
+        return report(
+          index + 1,
+          `The wait in ${label.toLowerCase()} was not met, so later steps did not run.`,
+        );
+    }
+    return report(list.length);
+  };
   return [
     ...(context.proactivity
       ? [
@@ -1184,7 +1311,7 @@ export function nodTools(
         };
       return context.reactToMessage(p.messageId, p.reaction);
     }),
-    bind(toolDefinitions.browser, async ({ action, name, ...rest }) => {
+    bind(toolDefinitions.browser, async ({ action, name, steps: list, ...rest }) => {
       if (action === 'handoff') {
         if (turn.execution.parentRunId)
           throw new Error(
@@ -1255,19 +1382,10 @@ export function nodTools(
         await checked.record?.();
         return observed({ action }, page);
       }
+      if (action === 'steps') return steps(list ?? []);
       const step = { action, ...rest } as BrowserAction;
-      if (action === 'evaluate' && context.browserStep)
-        try {
-          return observed(step, await computer.act(browserId, { ...step, readOnly: true }, signal));
-        } catch (error) {
-          if (!(error instanceof BrowserActionError && error.code === 'browser_script_writes'))
-            throw error;
-        }
-      const checked = commits(step) ? await check(step) : { binding: {} };
-      if ('output' in checked) return checked.output;
-      const page = await computer.act(browserId, { ...step, ...checked.binding }, signal);
-      if ('record' in checked) await checked.record?.();
-      return observed(step, page, checked.choice);
+      const done = await act(step);
+      return 'output' in done ? done.output : observed(step, done.page, done.choice);
     }),
     bind(toolDefinitions.sign_in, async ({ message, action, ...request }) => {
       const result = await context.requestCredential(request);
@@ -1424,13 +1542,20 @@ export function nodTools(
     bind(toolDefinitions.task, async (p) => {
       if (!context.task) throw new Error('Tasks are unavailable.');
       const result = await context.task(p);
-      return p.action === 'start' && !context.taskContext && !context.background
-        ? {
-            ...(result as object),
-            message:
-              'The task has started and its start message is already visible. The task now does this work in its own session and reports its result. Text you write after this is not shown: if another request still needs an answer, send it with send_message, otherwise end the turn.',
-          }
-        : result;
+      if (context.taskContext || context.background) return result;
+      if (p.action === 'start')
+        return {
+          ...(result as object),
+          message:
+            'The task has started and its start message is already visible. The task now does this work in its own session and reports its result. Text you write after this is not shown: if another request still needs an answer, send it with send_message, otherwise end the turn.',
+        };
+      if (p.action === 'reply')
+        return {
+          ...(result as object),
+          message:
+            'The task has the message and answers the owner itself. Do not confirm or repeat it in chat. Text you write after this is not shown: if another request still needs an answer, send it with send_message, otherwise end the turn.',
+        };
+      return result;
     }),
     bind(toolDefinitions.share_file, (p) => context.publish(p.path, p.name)),
     bind(toolDefinitions.create_audio, async (p) => {

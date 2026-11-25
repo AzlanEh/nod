@@ -2537,6 +2537,126 @@ test('links navigate without a check unless they send a known form', async () =>
   assert.deepEqual(seen, ['@form-link', '@button']);
 });
 
+test('browser steps run in order, stop at stale refs, unmet waits, failures and approvals', async () => {
+  let url = 'https://example.com/start';
+  const acted: string[] = [];
+  const checked: string[] = [];
+  const outputs: string[] = [];
+  const text = (result: Awaited<ReturnType<typeof call>>) =>
+    result.content.map((part) => ('text' in part ? part.text : '')).join('\n');
+  await taskFixture(
+    async (tools) => {
+      outputs.push(
+        text(
+          await call(tools, 'browser', {
+            action: 'steps',
+            steps: [
+              { action: 'open', url: 'https://example.com/results' },
+              { action: 'evaluate', script: 'document.title' },
+              { action: 'fill', selector: '#query', text: 'Synthetic query' },
+            ],
+          }),
+        ),
+      );
+      outputs.push(
+        text(
+          await call(tools, 'browser', {
+            action: 'steps',
+            steps: [
+              { action: 'click', selector: '@e2' },
+              { action: 'click', selector: '@e3' },
+            ],
+          }),
+        ),
+      );
+      outputs.push(
+        text(
+          await call(tools, 'browser', {
+            action: 'steps',
+            steps: [
+              { action: 'wait', text: 'Never' },
+              { action: 'click', selector: '#never' },
+            ],
+          }),
+        ),
+      );
+      await assert.rejects(
+        call(tools, 'browser', {
+          action: 'steps',
+          steps: [
+            { action: 'scroll', direction: 'down' },
+            { action: 'click', selector: '#broken' },
+            { action: 'click', selector: '#after-broken' },
+          ],
+        }),
+        /Ran 1 of 3 steps: scroll\. Step 2 \(click\) failed and may have taken effect/,
+      );
+      outputs.push(
+        text(
+          await call(tools, 'browser', {
+            action: 'steps',
+            steps: [
+              { action: 'fill', selector: '#name', text: 'Synthetic name' },
+              { action: 'click', selector: '#blocked' },
+              { action: 'click', selector: '#after-blocked' },
+            ],
+          }),
+        ),
+      );
+      await assert.rejects(
+        call(tools, 'browser', {
+          action: 'steps',
+          steps: [{ action: 'snapshot' }, { action: 'click', selector: '#late' }],
+        }),
+        /only as the last step/,
+      );
+    },
+    {
+      browserStep: async ({ step }) => {
+        checked.push(step.selector ?? '');
+        return step.selector === '#blocked' ? { result: 'Blocked' } : 'run';
+      },
+    },
+    {
+      computer: fakeComputer({
+        currentPage: async () => ({
+          origin: 'https://example.com',
+          url,
+          controls: [{ role: 'button', name: 'Go' }],
+        }),
+        act: async (_id, step) => {
+          acted.push(`${step.action} ${step.selector ?? step.url ?? step.script ?? ''}`.trim());
+          if (step.selector === '#broken') throw new Error('Synthetic browser failure');
+          if (step.action === 'open') url = step.url!;
+          if (step.selector === '@e2') url = 'https://example.com/next';
+          if (step.action === 'evaluate') return { url, text: 'Synthetic title' };
+          if (step.action === 'wait') return { url, text: 'Not yet', unmet: true };
+          return { url, text: `Synthetic page at ${url}` };
+        },
+      }),
+    },
+  );
+  assert.deepEqual(acted, [
+    'open https://example.com/results',
+    'evaluate document.title',
+    'fill #query',
+    'click @e2',
+    'wait',
+    'scroll',
+    'click #broken',
+    'fill #name',
+  ]);
+  assert.deepEqual(checked, ['@e2', '#broken', '#blocked']);
+  assert.match(outputs[0]!, /Ran 3 of 3 steps: open, evaluate, fill\./);
+  assert.match(outputs[0]!, /Step 2 \(evaluate\):\nURL: \S+\nSynthetic title/);
+  assert.match(outputs[0]!, /Synthetic page at https:\/\/example.com\/results/);
+  assert.match(outputs[1]!, /Ran 1 of 2 steps: click\.\n\nStopped before Step 2 \(click\)/);
+  assert.match(outputs[1]!, /Synthetic page at https:\/\/example.com\/next/);
+  assert.match(outputs[2]!, /Ran 1 of 2 steps: wait\.\n\nThe wait in step 1 \(wait\) was not met/);
+  assert.match(outputs[3]!, /Step 2 \(click\) and the steps after it did not run/);
+  assert.match(outputs[3]!, /Blocked/);
+});
+
 test('browser handoff requires a live page, binds its session and stops further work without a link', async () => {
   const sessionId = randomUUID();
   let opened = false;
