@@ -42,7 +42,10 @@ export function Items({ visual }: { visual: Visual<'items'> }) {
       {located && located.length > 1 && (
         <Pins items={located} selected={selected} onSelect={setSelected} />
       )}
-      <ul className="card-items">
+      <ul
+        className="card-items"
+        data-gutter={dots ? 'dot' : located && located.length > 1 ? 'index' : undefined}
+      >
         {visual.items.map((item, index) => {
           const expandable = Boolean(item.detail || item.facts);
           const link = item.url ?? (item.location && mapLocationUrl(item.location));
@@ -116,7 +119,7 @@ export function Items({ visual }: { visual: Visual<'items'> }) {
                   {item.facts && <Facts items={item.facts} />}
                   {link && (
                     <a
-                      className="button button-secondary button-sm card-open"
+                      className="button button-outline button-sm card-open"
                       href={link}
                       target="_blank"
                       rel="noopener noreferrer"

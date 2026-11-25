@@ -184,11 +184,17 @@ const itemsPresentation = z.strictObject({
   items: z
     .array(
       z.strictObject({
-        title: text(160),
-        sub: text(300).optional(),
+        title: text(120).describe('Short scannable item name.'),
+        sub: text(160)
+          .describe('One concise subtitle line, e.g. neighbourhood · price tier.')
+          .optional(),
         status: status.optional(),
-        value: text(80).optional(),
-        valueSub: text(80).optional(),
+        value: text(40)
+          .describe('Short right-aligned figure or rating, e.g. €125 or 4.6 ★.')
+          .optional(),
+        valueSub: text(48)
+          .describe('Brief context under value, e.g. OpenTable, 921 reviews.')
+          .optional(),
         route: z
           .strictObject({
             from: place,
@@ -208,7 +214,7 @@ const itemsPresentation = z.strictObject({
               .optional(),
           })
           .optional(),
-        warning: text(300).optional(),
+        warning: text(200).optional(),
         location: z
           .strictObject({
             latitude: z.number().finite().min(-90).max(90),
@@ -216,14 +222,20 @@ const itemsPresentation = z.strictObject({
           })
           .describe('Verified coordinates. When every item has one, the card shows them as pins.')
           .optional(),
-        detail: text(1000).optional(),
+        detail: text(360)
+          .describe(
+            'One or two short sentences when expanded; summarise ranges instead of listing raw slots.',
+          )
+          .optional(),
         facts: z.array(fact).min(1).max(12).optional(),
         url: url.optional(),
       }),
     )
     .min(1)
     .max(20),
-  note: text(400).optional(),
+  note: text(220)
+    .describe('One short line of context not already in the title; omit if redundant.')
+    .optional(),
 });
 const schedulePresentation = z.strictObject({
   ...common,
@@ -233,15 +245,17 @@ const schedulePresentation = z.strictObject({
       z.strictObject({
         start: text(40),
         end: text(40).optional(),
-        title: text(160),
-        detail: text(300).optional(),
+        title: text(120),
+        detail: text(180).optional(),
         quiet: z.boolean().describe('Free time, travel or a tentative block.').optional(),
         clash: z.boolean().describe('Overlaps another item.').optional(),
       }),
     )
     .min(1)
     .max(24),
-  note: text(400).optional(),
+  note: text(220)
+    .describe('One short line of context not already in the title; omit if redundant.')
+    .optional(),
 });
 const factsPresentation = z.strictObject({
   ...common,
@@ -253,18 +267,20 @@ const factsPresentation = z.strictObject({
     .array(fact.extend({ strong: z.boolean().describe('A total or the key figure.').optional() }))
     .min(1)
     .max(20),
-  note: text(400).optional(),
+  note: text(220)
+    .describe('One short line of context not already in the title; omit if redundant.')
+    .optional(),
 });
 const comparePresentation = z.strictObject({
   ...common,
   type: z.literal('compare'),
   pick: pick.optional(),
-  columns: z.array(text(80)).min(2).max(4),
+  columns: z.array(text(60)).min(2).max(4),
   rows: z
     .array(
       z.strictObject({
-        label: text(80),
-        values: z.array(text(120)).min(2).max(4),
+        label: text(60),
+        values: z.array(text(80)).min(2).max(4),
         best: z
           .number()
           .int()
@@ -282,8 +298,10 @@ const comparePresentation = z.strictObject({
     )
     .min(1)
     .max(12),
-  verdict: text(400).optional(),
-  note: text(400).optional(),
+  verdict: text(240).optional(),
+  note: text(220)
+    .describe('One short line of context not already in the title; omit if redundant.')
+    .optional(),
 });
 
 export const bugReportReplyHint =

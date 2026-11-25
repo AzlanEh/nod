@@ -277,7 +277,13 @@ test('map evidence accepts split and detail maps but rejects duplicate, wrong or
       await locations.check({
         messages: groups.map((places) => ({
           role: 'assistant',
-          presentation: { type: 'map', places },
+          presentation: {
+            type: 'items',
+            items: places.map(({ name, latitude, longitude }) => ({
+              title: name,
+              location: { latitude, longitude },
+            })),
+          },
         })),
       } as Run)
     ).pass;
@@ -3839,7 +3845,7 @@ test('the chart eval rejects writes even when the report was read and cited', as
     at: 0,
     turnId: null,
     presentation: {
-      type: 'chart',
+      type: 'compare',
       sources: [{ url: 'https://reports.visual-fixture.example.net/revenue/2026' }],
     },
   });

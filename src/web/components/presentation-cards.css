@@ -160,12 +160,22 @@ a.card-row {
 .card-detail {
   display: grid;
   gap: 8px;
-  padding: 2px 8px 12px 25px;
+  padding: 2px 8px 12px 8px;
   font-size: 13px;
 }
-.card-open {
+.card-items[data-gutter='dot'] .card-detail {
+  padding-left: 25px;
+}
+.card-items[data-gutter='index'] .card-detail {
+  padding-left: 40px;
+}
+.card-open.button {
   justify-self: start;
   gap: 6px;
+  color: var(--control-foreground);
+}
+.card-open.button:hover:not(:disabled) {
+  color: var(--foreground);
 }
 .card-detail p {
   margin: 0;

@@ -5,7 +5,7 @@ import { inlineVisualScenario, presentations } from '../world/inline-visuals.ts'
 const definition = inlineVisualScenario({
   id: 'inline-visual-flight-connections',
   title: 'Compare connecting flights without hiding transfer risks',
-  type: 'flights',
+  type: 'items',
   path: '/flights/lis-prg/connections',
   request: (date, source) =>
     `Compare the Lisbon to Prague options leaving on ${date} at ${source}. I need a cabin bag, want to arrive before noon the following day, and can spend €350 on flights. I prefer not to change airports or collect and recheck bags. Show the whole journey for each option here, including every flight and stop, and explain which you recommend and what is still uncertain. Don't book anything.`,
@@ -38,34 +38,25 @@ export default {
       check(
         'keeps-connections-and-technical-stops-in-their-segments',
         (run) => {
-          const visuals = presentations(run).filter((value) => value.type === 'flights') as Array<
-            Extract<Presentation, { type: 'flights' }>
+          const visuals = presentations(run).filter((value) => value.type === 'items') as Array<
+            Extract<Presentation, { type: 'items' }>
           >;
-          const journeys = visuals.flatMap((value) =>
-            value.options.flatMap((option) => option.journeys ?? []),
-          );
-          const journey = journeys.find(
-            (value) =>
-              value.segments.length === 3 &&
-              value.segments
-                .map((segment) => segment.flightNumber?.replace(/\s+/g, '').toUpperCase())
-                .join('|') === 'AV101|AV501|CB210',
-          );
-          const first = journey?.segments[0];
-          const middle = journey?.segments[1];
-          const last = journey?.segments[2];
+          const items = visuals.flatMap((value) => value.items);
+          const optionA = items.find((item) => {
+            const text = JSON.stringify(item).toUpperCase();
+            return text.includes('AV101') && text.includes('AV501') && text.includes('CB210');
+          });
+          const text = JSON.stringify(optionA ?? {});
           return {
             pass: Boolean(
-              first?.connectionAfter?.airportChange === 'no' &&
-              first.connectionAfter.selfTransfer === 'no' &&
-              middle?.technicalStops?.some((stop) => /\bZRH\b/i.test(stop.airport)) &&
-              middle.connectionAfter?.airportChange === 'yes' &&
-              middle.connectionAfter.selfTransfer === 'yes' &&
-              /\bFRA\b/i.test(middle.arrival.airport) &&
-              last &&
-              /\bHHN\b/i.test(last.departure.airport),
+              optionA?.route &&
+              /\bZRH\b/i.test(text) &&
+              /\bFRA\b/i.test(text) &&
+              /\bHHN\b/i.test(text) &&
+              optionA.warning &&
+              /airport|transfer|separate/i.test(optionA.warning),
             ),
-            evidence: JSON.stringify(journey ?? { journeys: journeys.length }),
+            evidence: JSON.stringify(optionA ?? { items: items.length }),
           };
         },
         { failure: 'reasoning' },

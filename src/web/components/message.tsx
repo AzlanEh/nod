@@ -408,7 +408,6 @@ export function MessageBubble({
   const outsideCard =
     message.role === 'assistant' &&
     !streaming &&
-    Boolean(visibleText.trim()) &&
     (message.presentation?.type === 'items' ||
       message.presentation?.type === 'schedule' ||
       message.presentation?.type === 'facts' ||
@@ -428,6 +427,28 @@ export function MessageBubble({
     message.replyTo && !(message.role === 'assistant' && message.replyTo.role === 'assistant')
       ? message.replyTo
       : null;
+  const hasBubbleContent = Boolean(
+    visibleReply ||
+    cardText?.lead ||
+    pendingAudio ||
+    (message.role === 'user' && message.attachments.length > 0) ||
+    card ||
+    shownText ||
+    (message.role === 'assistant' &&
+      !streaming &&
+      message.presentation &&
+      !outsideCard &&
+      message.presentation.type !== 'apps' &&
+      message.presentation.type !== 'schedule-run') ||
+    (message.role === 'assistant' &&
+      message.attachments.some(
+        (attachment) =>
+          !message.presentation ||
+          !presentationImages(message.presentation).some(
+            (image) => image.artifactId === attachment.id,
+          ),
+      )),
+  );
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
   const [quote, setQuote] = useState('');
@@ -736,7 +757,7 @@ export function MessageBubble({
       <div className="message-content">
         {work && <WorkLabel work={work} />}
         {run && <ScheduleRunTrack run={run} />}
-        <div className="message-row" hidden={run?.outcome === 'failed'}>
+        <div className="message-row" hidden={run?.outcome === 'failed' || !hasBubbleContent}>
           <div className={`message-bubble${!streaming && shownReaction ? ' has-reaction' : ''}`}>
             <div
               className="message-body"
