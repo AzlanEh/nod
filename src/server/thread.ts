@@ -2299,13 +2299,28 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
   const published = new Map<string, Artifact>();
   let sourceMessageId: string | null = null;
   const ownerMessageIds: string[] = [];
-  const ownerRequest = (request: unknown) => {
+  const ownerRequest = async (request: unknown, start: boolean) => {
     if (request !== undefined) {
-      if (typeof request !== 'string' || !ownerMessageIds.includes(request))
+      if (typeof request === 'string' && ownerMessageIds.includes(request)) return request;
+      const earlier =
+        start &&
+        typeof request === 'string' &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(request) &&
+        (
+          await pool.query(
+            `SELECT 1 FROM messages m JOIN threads th ON th.id=m.thread_id AND th.owner_id=m.owner_id
+             WHERE m.id=$1 AND m.owner_id=$2 AND m.thread_id=$3 AND m.role='user' AND m.hidden_at IS NULL
+               AND m.created_at>COALESCE(th.chat_restarted_at,'-infinity')`,
+            [request, ownerId, threadId],
+          )
+        ).rowCount;
+      if (!earlier)
         throw new Error(
-          'request must be currentMessageId or the messageId of an owner message sent while you worked.',
+          start
+            ? 'request must be the messageId of an owner message in this chat, such as currentMessageId or one sent while you worked.'
+            : 'request must be currentMessageId or the messageId of an owner message sent while you worked.',
         );
-      return request;
+      return request as string;
     }
     if (ownerMessageIds.length > 1)
       throw new Error(
@@ -2722,7 +2737,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
       ),
       task:
         dependencies.task &&
-        fenced((raw) => {
+        fenced(async (raw) => {
           const { request, ...input } = (raw ?? {}) as {
             request?: unknown;
             action?: unknown;
@@ -2730,7 +2745,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
           };
           const bound =
             input.action === 'start' || input.action === 'reply'
-              ? ownerRequest(request)
+              ? await ownerRequest(request, input.action === 'start')
               : sourceMessageId;
           const prior =
             input.action === 'start' && bound

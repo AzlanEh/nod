@@ -2,6 +2,7 @@ import type { FlightSearch } from '../ports/flights.ts';
 import { presentationInputSchema, type Presentation } from '../shared/presentation.ts';
 import { proactiveUpdateSchema, sourceReadSchema } from '../shared/proactivity.ts';
 import { appPages } from '../shared/app-links.ts';
+import { splitQuestion } from '../shared/answer-choices.ts';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
@@ -347,6 +348,12 @@ export function createAgentRuntime(dependencies: {
     let taskResult = '';
     let screened = false;
     const speaks = !context.proactivity && (!context.background || Boolean(context.taskContext));
+    const stripToolMarkup = (text: string) =>
+      text
+        .replace(/<invoke\b[\s\S]*?(?:<\/invoke>|$)/gi, '')
+        .replace(/<\/?(?:invoke|parameter|function_calls|antml:[a-z_]+)\b[^>]*>/gi, '')
+        .replace(/[\u200b\ufeff]+$/g, '')
+        .trim();
     const deliverReply = async (
       text: string,
       id?: string,
@@ -355,7 +362,7 @@ export function createAgentRuntime(dependencies: {
       handoff?: boolean,
     ): Promise<ReplyDelivery> => {
       signal.throwIfAborted();
-      const trimmed = text.trim();
+      const trimmed = stripToolMarkup(text);
       const visual = presentation ? JSON.stringify(presentation) : '';
       const outcome: ReplyDelivery['presentation'] = presentation ? 'original' : 'none';
       if (
@@ -371,11 +378,11 @@ export function createAgentRuntime(dependencies: {
       return { delivered: true, presentation: outcome };
     };
     const reply = deliverReply;
-    const answerFirst = () => {
+    const answerFirst = (question = false) => {
       if (!owed.length || owedRefused || !speaks) return;
       owedRefused = true;
       throw new Error(
-        "Not run, and no question was asked: the owner's latest messages have no answer yet. Answer them in text now, then call this again.",
+        `Not run, and no question was asked: the owner's latest messages have no answer yet. ${question ? 'Put the answer to anything else they asked first, as its own paragraph, then the question alone, and call this again. If the question is all the answer they need, call it again unchanged' : 'Answer them in text now, then call this again'}.`,
       );
     };
     let unreadRefused = -1;
@@ -388,11 +395,18 @@ export function createAgentRuntime(dependencies: {
       );
     };
     let handoffBrowserId: string | undefined;
-    const pause: Turn['pause'] = async (reason, message, choices) => {
-      if (reason === 'question') {
-        answerFirst();
-        await readFirst();
-      }
+    let deferredPause:
+      | {
+          reason: Parameters<Turn['pause']>[0];
+          message?: string;
+          choices?: Parameters<Turn['pause']>[2];
+        }
+      | undefined;
+    const commitPause = async (
+      reason: Parameters<Turn['pause']>[0],
+      message?: string,
+      choices?: Parameters<Turn['pause']>[2],
+    ) => {
       if (browsed) {
         const hold = computer.hold(browserId, true);
         if (reason === 'browser') await hold;
@@ -405,6 +419,18 @@ export function createAgentRuntime(dependencies: {
       if (reason === 'browser') handoffBrowserId = browserId;
       stopped = true;
       abortSession();
+    };
+    const pause: Turn['pause'] = async (reason, message, choices, options) => {
+      if (reason === 'question') {
+        if (!splitQuestion(message ?? '').lead) answerFirst(true);
+        await readFirst();
+      }
+      if (options?.deferred) {
+        deferredPause = { reason, message, choices };
+        return;
+      }
+      deferredPause = undefined;
+      await commitPause(reason, message, choices);
     };
     const confirm = async (result: unknown) => {
       if (!(result && typeof result === 'object' && appConfirmation in result)) return result;
@@ -629,10 +655,14 @@ export function createAgentRuntime(dependencies: {
           if (
             name === 'send_message' ||
             name === 'create_audio' ||
-            (name === 'task' && (params as { action?: unknown } | null)?.action === 'start')
+            (name === 'task' &&
+              ['start', 'reply'].includes(String((params as { action?: unknown } | null)?.action)))
           )
             reported = true;
-          if (name === 'task' && (params as { action?: unknown } | null)?.action === 'start') {
+          if (
+            name === 'task' &&
+            ['start', 'reply'].includes(String((params as { action?: unknown } | null)?.action))
+          ) {
             taskStartRevision = revision;
             const request = (params as { request?: unknown }).request;
             owed = owed.filter((owedId) => owedId !== request);
@@ -980,10 +1010,12 @@ export function createAgentRuntime(dependencies: {
           replyToMessageId?: string,
           presentation?: Presentation,
           handoff?: boolean,
+          partial?: boolean,
         ) => {
           const chat = !context.taskContext && !handoff;
           const first = chat && !spoke;
-          const target = replyToMessageId ?? (chat && !first ? owed.at(-1) : undefined);
+          const target =
+            replyToMessageId ?? (chat && !first && owed.length === 1 ? owed[0] : undefined);
           const delivery = await reply(text, id, target, presentation, handoff);
           if (delivery.delivered && chat) {
             spoke = true;
@@ -992,7 +1024,7 @@ export function createAgentRuntime(dependencies: {
           if (delivery.delivered && !handoff)
             owed = replyToMessageId
               ? owed.filter((owedId) => owedId !== replyToMessageId)
-              : first
+              : first || (partial && owed.length > 1)
                 ? owed
                 : [];
           return delivery;
@@ -1036,7 +1068,10 @@ export function createAgentRuntime(dependencies: {
         try {
           child = await agent.open({
             ...source,
-            ...(context.model ? { model: context.model } : {}),
+            ...((context.delegateModel ?? context.model)
+              ? { model: context.delegateModel ?? context.model }
+              : {}),
+            lighterEffort: true,
             automatic: Boolean(context.automatic),
             ephemeral: true,
             systemPrompt: system,
@@ -1193,6 +1228,7 @@ export function createAgentRuntime(dependencies: {
       const opening = agent.open({
         ...execution,
         ...(context.model ? { model: context.model } : {}),
+        ...(context.taskContext ? { lighterEffort: true } : {}),
         automatic: Boolean(context.automatic),
         contextRestart: context.contextRestart,
         ...(context.proactivity ? { restricted: true } : {}),
@@ -1210,6 +1246,14 @@ export function createAgentRuntime(dependencies: {
         timeZone: context.timeZone,
         runTool: sandboxTool(execution, workspace.path),
         shouldStop: (results) => {
+          if (deferredPause) {
+            const pending = deferredPause;
+            deferredPause = undefined;
+            if (!results?.some((result) => result.error !== undefined)) {
+              void commitPause(pending.reason, pending.message, pending.choices);
+              return true;
+            }
+          }
           if (stopped || finalDelivered) return true;
           if (progress.stopped(results)) return true;
           if (checkInBlocked) checkInStrikes++;
@@ -1230,13 +1274,14 @@ export function createAgentRuntime(dependencies: {
               owed = [...owed, ...incoming.map((message) => message.id)];
               owedRefused = false;
             }
-            for (const message of incoming) {
+            for (const [index, message] of incoming.entries()) {
+              const batch = { index, total: incoming.length };
               const { images, omitted, analysis } = await inline(
                 message.attachments,
                 message.text,
                 budget,
               );
-              const fallback = instruct(steeredInstruction(message, omitted, analysis));
+              const fallback = instruct(steeredInstruction(message, omitted, analysis, batch));
               const audio = nativeAudio(message.attachments, fallback);
               messages.push({
                 text: audio
@@ -1245,6 +1290,7 @@ export function createAgentRuntime(dependencies: {
                         { ...message, text: message.audioCaption ?? message.text },
                         omitted,
                         analysis,
+                        batch,
                       ),
                     )
                   : fallback,
@@ -1303,7 +1349,8 @@ export function createAgentRuntime(dependencies: {
             if (event.status === 'incomplete')
               modelIncomplete = event.contextExhausted ? 'context' : 'output';
             flushText();
-            const text = streamSubmitted || stopped ? '' : streamedText.trim();
+            const handsOff = event.beforeTool === 'task' && !context.taskContext;
+            const text = streamSubmitted || stopped || handsOff ? '' : streamedText.trim();
             if (
               text &&
               !modelError &&
@@ -1313,7 +1360,7 @@ export function createAgentRuntime(dependencies: {
                 queueStreamReply(
                   text,
                   streamId ?? randomUUID(),
-                  context.taskContext || !spoke ? undefined : owed.at(-1),
+                  context.taskContext || !spoke || owed.length !== 1 ? undefined : owed[0],
                 );
                 lastNote = '';
                 owed = [];
@@ -1410,6 +1457,11 @@ export function createAgentRuntime(dependencies: {
         audio ? undefined : (observer?.stable ?? scheduled?.stable),
       );
       await pendingReplies;
+      if (deferredPause && !stopped) {
+        const pending = deferredPause;
+        deferredPause = undefined;
+        await commitPause(pending.reason, pending.message, pending.choices);
+      }
       signal.throwIfAborted();
       if (progress.error)
         throw new ToolFailureError((dependencies.redactError ?? String)(progress.error));

@@ -620,7 +620,7 @@ const flightRisks = (segment: FlightSegment) => [
     : []),
 ];
 const stop = (place: FlightSegment['departure']) => ({
-  place: clip(place.airport, 80),
+  place: clip(airportCode(place.airport), 80),
   time: clip(place.time, 40),
   ...(place.date ? { note: clip(place.date, 80) } : {}),
 });

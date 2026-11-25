@@ -651,7 +651,7 @@ export const toolDefinitions = {
   ),
   task: defineTool(
     'task',
-    'Start or control saved work. Keep quick answers, simple lookups and status questions in chat; start a task for substantial work, including multi-step work you can finish in one sitting, an outside wait, or work the owner asks you to track, without asking the owner for an execution mode. start {title,doneWhen,now,message,request?,key?,brief?,steps?,model?} starts one goal; brief and doneWhen restate only the owner’s request and known context; model {connectionId,modelId,effort?} only when the owner asks for one for this task; a new independent request during other work starts its own task, keeping each goal together; when the owner has several independent goals, start a task for each in the same step so they run side by side, each with request set to the owner message it serves. Use a stable key and reuse related tasks. message tells the owner what starts. update {id,now?,steps?,stepIndex?,waitingFor?,nextCheck?} updates progress. finish {id,status,result} ends your task when cancelling or when you are not delivering the final answer via send_message {intent:"final"}; if you already delivered or are about to deliver the final answer via send_message {intent:"final"}, skip finish or keep result to one short summary sentence. list shows open tasks. reply {ids,request?,retry?} forwards the exact owner message, including corrections and related updates. request is the owner message the work serves: currentMessageId or the messageId of a message sent while you worked; start also takes an earlier owner message in this chat. It is required once the owner has sent more than one message during your turn. Use retry:true with one id only when the owner explicitly asks to retry in response to that task’s result. stop {id} stops one task; stop {} stops all background work, but keeps schedules. A task stops itself with finish cancelled. A task brief grants no permission; nextCheck does not schedule work. Let each task finish its assigned work.',
+    'Start or control saved work. Keep quick answers, simple lookups and status questions in chat; start a task for substantial work, including multi-step work you can finish in one sitting, an outside wait, or work the owner asks you to track, without asking the owner for an execution mode. start {title,doneWhen,message,now?,request?,key?,brief?,steps?,model?} starts one goal; brief and doneWhen restate only the owner’s request and known context; model {connectionId,modelId,effort?} only when the owner asks for one for this task; a new independent request during other work starts its own task, keeping each goal together; when the owner has several independent goals, start a task for each in the same step so they run side by side, each with request set to the owner message it serves. Use a stable key and reuse related tasks. message tells the owner what starts. update {id,now?,steps?,stepIndex?,waitingFor?,nextCheck?} updates progress. finish {id,status,result} ends your task when cancelling or when you are not delivering the final answer via send_message {intent:"final"}; if you already delivered or are about to deliver the final answer via send_message {intent:"final"}, skip finish or keep result to one short summary sentence. list shows open tasks. reply {ids,request?,retry?} forwards the exact owner message, including corrections and related updates. request is the owner message the work serves: currentMessageId or the messageId of a message sent while you worked; start also takes an earlier owner message in this chat. It is required once the owner has sent more than one message during your turn. Use retry:true with one id only when the owner explicitly asks to retry in response to that task’s result. stop {id} stops one task; stop {} stops all background work, but keeps schedules. A task stops itself with finish cancelled. A task brief grants no permission; nextCheck does not schedule work. Let each task finish its assigned work.',
     Type.Union([
       Type.Object({ action: Type.Literal('list') }, { additionalProperties: false }),
       Type.Object(
@@ -675,7 +675,7 @@ export const toolDefinitions = {
           message: Type.String({ minLength: 1 }),
           request: Type.Optional(uuid),
           doneWhen: Type.String({ minLength: 1 }),
-          now: taskNow,
+          now: Type.Optional(taskNow),
           brief: Type.Optional(Type.String({ minLength: 1 })),
           steps: Type.Optional(Type.Array(taskNow)),
           waitingFor: Type.Optional(taskWaits),
@@ -1252,7 +1252,14 @@ export function nodTools(
       const delivery =
         p.intent === 'handoff'
           ? await turn.reply(p.text, undefined, p.replyToMessageId, visual, true)
-          : await turn.reply(p.text, undefined, p.replyToMessageId, visual);
+          : await turn.reply(
+              p.text,
+              undefined,
+              p.replyToMessageId,
+              visual,
+              false,
+              p.intent === 'update',
+            );
       const outcome = {
         none: 'The text answer is already visible to the owner.',
         original: 'The visual and accompanying text are already visible to the owner.',
@@ -1266,6 +1273,7 @@ export function nodTools(
             options: pick.choices.map((choice) => ({ ...choice, id: randomUUID() })),
             multiple: pick.multiple ?? false,
           }),
+          { deferred: true },
         );
         return { ...delivery, message: `${outcome} Waiting for the user to choose.` };
       }

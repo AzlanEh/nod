@@ -73,6 +73,18 @@ export function checkEffort(efforts: ModelEffort[]) {
   );
 }
 
+export function lighterEffort(efforts: ModelEffort[], current: ModelEffort): ModelEffort {
+  const rank = (level: ModelEffort) =>
+    ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].indexOf(level);
+  const chosen = rank(current);
+  const target =
+    efforts.find((level) => level === 'medium') ??
+    efforts.find((level) => level === 'low') ??
+    efforts.find((level) => level === 'minimal');
+  if (target && (chosen < 0 || rank(target) < chosen)) return target;
+  return efforts.includes(current) ? current : efforts[0];
+}
+
 export interface ModelChoice {
   id: string;
   name: string;

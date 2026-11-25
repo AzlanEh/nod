@@ -3180,6 +3180,26 @@ test(
             );
           await start(context.currentMessageId);
           await start(later!.id);
+          const earlier = (
+            await db.pool.query<{ id: string }>(
+              `SELECT id::text FROM messages WHERE thread_id=$1 AND role='user' AND hidden_at IS NULL
+                 AND id<>ALL($2::uuid[]) ORDER BY created_at DESC LIMIT 1`,
+              [context.threadId, [context.currentMessageId, later!.id]],
+            )
+          ).rows[0];
+          if (earlier)
+            await start(earlier.id).then(
+              () => outcomes.push('started earlier'),
+              (error: Error) => outcomes.push(error.message),
+            );
+          await context.task!({
+            action: 'reply',
+            request: randomUUID(),
+            message: 'Synthetic reply',
+          }).then(
+            () => outcomes.push('replied'),
+            (error: Error) => outcomes.push(error.message),
+          );
           return { status: 'succeeded' };
         };
         try {
@@ -3192,6 +3212,8 @@ test(
           await waitFor(settled(active.turnId));
           assert.deepEqual(outcomes, [
             'The owner sent several messages during this turn. Set request to the messageId of the one this work serves.',
+            'request must be the messageId of an owner message in this chat, such as currentMessageId or one sent while you worked.',
+            'started earlier',
             'request must be currentMessageId or the messageId of an owner message sent while you worked.',
           ]);
           const { rows } = await db.pool.query<{ source: string; prompt: string }>(

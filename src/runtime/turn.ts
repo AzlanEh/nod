@@ -19,11 +19,13 @@ export interface Turn {
     replyToMessageId?: string,
     presentation?: Presentation,
     handoff?: boolean,
+    partial?: boolean,
   ): Promise<ReplyDelivery>;
   pause(
     reason: 'question' | 'approval' | 'credentials' | 'browser',
     message?: string,
     answerChoices?: AnswerChoices,
+    options?: { deferred?: boolean },
   ): Promise<void>;
   checkInCost?(): { spent: string; plan: string } | undefined;
   confirm(result: unknown): Promise<unknown>;

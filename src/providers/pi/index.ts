@@ -58,7 +58,7 @@ import {
 import { threadIdentity } from '../../ports/thread-identity.ts';
 import { createPiUsageTracker, piUsageMetrics, usageId } from './usage.ts';
 import { agentModels } from '../../shared/model-defaults.ts';
-import { modelPricingSignature, type ModelSelection } from '../../shared/models.ts';
+import { lighterEffort, modelPricingSignature, type ModelSelection } from '../../shared/models.ts';
 import { createSandbox, workspaceOutputs } from './sandbox.ts';
 import { untrustedBlock } from '../../shared/untrusted.ts';
 import { draft2020Schema } from '../../shared/json-schema.ts';
@@ -1159,12 +1159,16 @@ export function createPiAgent(options: {
         ),
       ];
       const resumed = !restart && manager.buildSessionContext().messages.length > 0;
+      const thinkingLevel =
+        access && input.lighterEffort
+          ? lighterEffort(access.definition.choice.efforts, access.effort)
+          : (access?.effort ?? (input.lighterEffort ? 'low' : 'high'));
       const { session } = await (options.createSession ?? createAgentSession)({
         cwd: input.workspace.path,
         agentDir: directory,
         modelRuntime: runtime,
         model: sessionModel,
-        thinkingLevel: access?.effort ?? 'high',
+        thinkingLevel,
         tools: directTools.map((name) => `+${name}`),
         customTools: tools,
         noTools: 'builtin',
@@ -1363,7 +1367,11 @@ export function createPiAgent(options: {
           }
           if (update.type === 'toolcall_end') startEarly(update.partial, update.contentIndex);
           if (update.type === 'toolcall_start' && textBlock !== undefined) {
-            input.onEvent({ type: 'message_end' });
+            const call = update.partial.content[update.contentIndex];
+            input.onEvent({
+              type: 'message_end',
+              ...(call?.type === 'toolCall' && call.name ? { beforeTool: call.name } : {}),
+            });
             input.onEvent({ type: 'message_start' });
             textBlock = undefined;
           }

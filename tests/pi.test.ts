@@ -3262,6 +3262,14 @@ test('task handoff shows only the start message unless a steered request needs a
       final: 'I started two synthetic jobs and each reports back when done.',
       expected: [],
     },
+    {
+      name: 'correction forwarded to a running task',
+      earlyUpdate: false,
+      steer: false,
+      forward: true,
+      final: 'Done, the synthetic review now covers both inboxes.',
+      expected: [],
+    },
   ] as const;
   for (const scenario of cases)
     await t.test(scenario.name, async () => {
@@ -3281,16 +3289,27 @@ test('task handoff shows only the start message unless a steered request needs a
                   .execute({ text: acknowledgement, intent: 'update' });
               if ('steerBefore' in scenario && scenario.steerBefore)
                 incoming.push(...((await input.nextMessages?.()) ?? []).map((item) => item.text));
-              await input.tools
-                .find((tool) => tool.name === 'task')!
-                .execute({
-                  action: 'start',
-                  title: 'Review synthetic inbox',
-                  doneWhen: 'Urgent messages identified and draft replies saved',
-                  now: 'Reviewing synthetic inbox',
-                  message: startMessage,
-                  ...('startsSteered' in scenario ? { request: steeredId } : {}),
+              if ('forward' in scenario) {
+                input.onEvent({ type: 'message_start' });
+                input.onEvent({
+                  type: 'text_delta',
+                  text: 'This refers to the inbox review. Forward it to that task.',
                 });
+                input.onEvent({ type: 'message_end', beforeTool: 'task' });
+                await input.tools
+                  .find((tool) => tool.name === 'task')!
+                  .execute({ action: 'reply', ids: [randomUUID()] });
+              } else
+                await input.tools
+                  .find((tool) => tool.name === 'task')!
+                  .execute({
+                    action: 'start',
+                    title: 'Review synthetic inbox',
+                    doneWhen: 'Urgent messages identified and draft replies saved',
+                    now: 'Reviewing synthetic inbox',
+                    message: startMessage,
+                    ...('startsSteered' in scenario ? { request: steeredId } : {}),
+                  });
               if (!('steerBefore' in scenario && scenario.steerBefore))
                 incoming.push(...((await input.nextMessages?.()) ?? []).map((item) => item.text));
               input.onEvent({ type: 'message_start' });
@@ -4110,6 +4129,47 @@ test('send_message validates structured visuals and delivers each distinct prese
       ],
     );
     assert.equal(result.answerChoices?.multiple, false);
+  });
+
+  await t.test('a card with pick does not abort the turn when a sibling tool failed', async (t) => {
+    const replies: Array<Parameters<RuntimeContext['reply']>> = [];
+    const row = (index: number) => ({ title: `Option ${index}`, value: `€${index}0` });
+    let continued = false;
+    const runtime = createAgentRuntime({
+      agent: {
+        open: async (input) => ({
+          resumed: false,
+          abort() {},
+          dispose() {},
+          prompt: async () => {
+            const send = input.tools.find((tool) => tool.name === 'send_message')!;
+            await send.execute({
+              text: '',
+              intent: 'update',
+              presentation: { ...items, pick: { question: 'Which one?' }, items: [1, 2].map(row) },
+            });
+            continued = !input.shouldStop([
+              { name: 'task', error: 'Invalid task input' },
+              { name: 'send_message' },
+            ]);
+          },
+        }),
+        dispose() {},
+      },
+      computer: fakeComputer(),
+      workspace: fakeWorkspace(),
+    });
+    t.after(() => runtime.dispose());
+    const result = await runtime.runTurn({
+      ...context(directory),
+      turnId: randomUUID(),
+      reply: async (...args) => {
+        replies.push(args);
+      },
+    });
+    assert.equal(continued, true);
+    assert.equal(replies.length, 1);
+    assert.equal(result.status, 'succeeded');
   });
 });
 
