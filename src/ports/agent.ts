@@ -197,7 +197,7 @@ export interface RuntimeContext {
   reply(
     text: string,
     streamId?: string,
-    replyToMessageId?: string,
+    replyToMessageId?: string | null,
     presentation?: Presentation,
     handoff?: boolean,
   ): Promise<void>;

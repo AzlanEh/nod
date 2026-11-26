@@ -3005,7 +3005,7 @@ test('a turn posts its opening line and final reply, shows the lines between as 
       ],
     ] as const) {
       const posted: string[] = [];
-      const postedTargets: Array<string | undefined> = [];
+      const postedTargets: Array<string | null | undefined> = [];
       const events: Array<[string, string]> = [];
       let steered = false;
       const steeredId = randomUUID();
@@ -3094,7 +3094,7 @@ test('a question waits until a message sent mid-turn has its answer', async (t) 
     workspace: fakeWorkspace(),
   });
   t.after(() => runtime.dispose());
-  const posted: Array<[string, string | undefined]> = [];
+  const posted: Array<[string, string | null | undefined]> = [];
   let taken = false;
   const result = await runtime.runTurn({
     ...context(directory),
@@ -3187,7 +3187,7 @@ test("a turn's first answer stays on its own request when a message arrives befo
     workspace: fakeWorkspace(),
   });
   t.after(() => runtime.dispose());
-  const posted: Array<[string, string | undefined]> = [];
+  const posted: Array<[string, string | null | undefined]> = [];
   let taken = false;
   await runtime.runTurn({
     ...context(directory),

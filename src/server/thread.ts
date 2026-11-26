@@ -2338,7 +2338,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
     text: string,
     attachments: Artifact[] = [],
     streamId?: string,
-    replyToMessageId?: string,
+    replyToMessageId?: string | null,
     presentation?: Presentation,
     handoff = false,
   ) => {

@@ -75,6 +75,7 @@ const input = z.discriminatedUnion('action', [
     .object({
       action: z.literal('update'),
       id: z.uuid(),
+      title: z.string().trim().min(1).optional(),
       now: now.optional(),
       steps: z.array(now).optional(),
       stepIndex: z.number().int().nonnegative().optional(),
@@ -642,7 +643,7 @@ export function createTasks(options: {
       const updated =
         request.action === 'update'
           ? await client.query(
-              `UPDATE tasks SET now_text=COALESCE($3,now_text),steps=COALESCE($4,steps),step_index=COALESCE($5,step_index),
+              `UPDATE tasks SET title=COALESCE($8,title),now_text=COALESCE($3,now_text),steps=COALESCE($4,steps),step_index=COALESCE($5,step_index),
            waiting_for=COALESCE($6,waiting_for),next_check=COALESCE($7,next_check),updated_at=now()
            WHERE id=$1 AND owner_id=$2 AND state='open'
              AND COALESCE($5,step_index)<GREATEST(jsonb_array_length(COALESCE($4,steps)),1)`,
@@ -654,6 +655,7 @@ export function createTasks(options: {
                 request.stepIndex ?? null,
                 request.waitingFor ? JSON.stringify(request.waitingFor) : null,
                 request.nextCheck ?? null,
+                request.title ?? null,
               ],
             )
           : await client.query(

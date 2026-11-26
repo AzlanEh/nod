@@ -357,7 +357,7 @@ export function createAgentRuntime(dependencies: {
     const deliverReply = async (
       text: string,
       id?: string,
-      replyToMessageId?: string,
+      replyToMessageId?: string | null,
       presentation?: Presentation,
       handoff?: boolean,
     ): Promise<ReplyDelivery> => {
@@ -422,7 +422,7 @@ export function createAgentRuntime(dependencies: {
     };
     const pause: Turn['pause'] = async (reason, message, choices, options) => {
       if (reason === 'question') {
-        if (!splitQuestion(message ?? '').lead) answerFirst(true);
+        if (!options?.answered && !splitQuestion(message ?? '').lead) answerFirst(true);
         await readFirst();
       }
       if (options?.deferred) {
@@ -1015,16 +1015,21 @@ export function createAgentRuntime(dependencies: {
           const chat = !context.taskContext && !handoff;
           const first = chat && !spoke;
           const target =
-            replyToMessageId ?? (chat && !first && owed.length === 1 ? owed[0] : undefined);
+            replyToMessageId ??
+            (chat && !first && owed.length === 1
+              ? owed[0]
+              : chat && owed.length > 1
+                ? null
+                : undefined);
           const delivery = await reply(text, id, target, presentation, handoff);
           if (delivery.delivered && chat) {
             spoke = true;
-            spokeTo = target;
+            spokeTo = target ?? undefined;
           }
           if (delivery.delivered && !handoff)
             owed = replyToMessageId
               ? owed.filter((owedId) => owedId !== replyToMessageId)
-              : first || (partial && owed.length > 1)
+              : first
                 ? owed
                 : [];
           return delivery;
@@ -1063,6 +1068,17 @@ export function createAgentRuntime(dependencies: {
         let incomplete = false;
         let completed = false;
         const childProgress = toolProgress();
+        let childSteps = 0;
+        const maxChildSteps = 6;
+        const childTimeoutMs = 45_000;
+        let childTimedOut = false;
+        const childTimer = setTimeout(() => {
+          childTimedOut = true;
+          void Promise.resolve()
+            .then(() => child?.abort())
+            .catch(() => {});
+        }, childTimeoutMs);
+        childTimer.unref?.();
         await context.emit('agent_start', title, { execution: source });
         let child: AgentSession | undefined;
         try {
@@ -1083,7 +1099,11 @@ export function createAgentRuntime(dependencies: {
             workspace: { ...workspace, path: childPath },
             timeZone: context.timeZone,
             runTool: sandboxTool(source, childPath),
-            shouldStop: (results) => stopped || overBudget() || childProgress.stopped(results),
+            shouldStop: (results) =>
+              stopped ||
+              overBudget() ||
+              childProgress.stopped(results) ||
+              ++childSteps >= maxChildSteps,
             onEvent: (event) => {
               countUsage(event);
               if (event.type === 'final') answer = event.text;
@@ -1101,16 +1121,24 @@ export function createAgentRuntime(dependencies: {
           children.add(child);
           assertActive();
           await child.prompt(
-            `${currentUserTime(context.timeZone)}\nYou are a subagent doing one part of the owner's request: ${title}\n${instruction}\nYour working directory is ${childPath}. Write new files there. The shared workspace is ${workspace.path}. Give complete file paths in your answer. Return any question or browser blocker to the parent agent. Do not hand your browser to the owner. Your final answer goes back to the parent agent, so include every result it needs.`,
+            `${currentUserTime(context.timeZone)}\nYou are a subagent doing one part of the owner's request: ${title}\n${instruction}\nBe fast and focused: you have at most ${maxChildSteps} tool steps and ${Math.round(childTimeoutMs / 1000)} seconds. Use web_search, fetch_content or a few targeted browser steps; if a site blocks you or takes more than 2–3 tries, report what you found so far instead of looping. Your working directory is ${childPath}. Write new files there. The shared workspace is ${workspace.path}. Give complete file paths in your answer. Return any question or browser blocker to the parent agent. Do not hand your browser to the owner. Your final answer goes back to the parent agent, so include every result it needs.`,
             [],
           );
           if (childProgress.error)
             throw new ToolFailureError((dependencies.redactError ?? String)(childProgress.error));
+          if (childTimedOut && !stopped) {
+            completed = true;
+            return (
+              answer ||
+              `Timed out after ${Math.round(childTimeoutMs / 1000)}s while working on "${title}". Use what other subagents found or try one quick lookup.`
+            );
+          }
           if (failure) throw new Error(`The subagent model request failed: ${failure}`);
           if (incomplete) throw new Error('The subagent response was incomplete.');
           assertActive();
           completed = true;
         } finally {
+          clearTimeout(childTimer);
           if (child) children.delete(child);
           await Promise.resolve()
             .then(() => child?.dispose())
