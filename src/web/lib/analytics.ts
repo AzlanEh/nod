@@ -157,6 +157,7 @@ const presentationKinds = [
   'schedule',
   'facts',
   'compare',
+  'draft',
 ];
 const artifactKinds = [
   'image',

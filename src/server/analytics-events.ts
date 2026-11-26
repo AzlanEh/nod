@@ -145,6 +145,7 @@ export const analyticsEvent = z.discriminatedUnion('event', [
               'schedule',
               'facts',
               'compare',
+              'draft',
             ]),
             count: z.literal(1),
           })
