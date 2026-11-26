@@ -7,6 +7,7 @@ import type { World } from './scenario.ts';
 import type { Visit } from './world/sites.ts';
 import { browserSessionId } from '../../src/providers/agent-browser/index.ts';
 import type { UsageDetails } from '../../src/shared/execution.ts';
+import { presentationSchema, presentationText } from '../../src/shared/presentation.ts';
 import { redactedInput } from './capture.ts';
 import { sumBudgetCosts, validCost } from './spend.ts';
 
@@ -490,15 +491,23 @@ export async function collect(options: {
     status: row.status as string,
     args: row.args,
   }));
+  const messageText = (message: ChatMessage) => {
+    const parsed = message.presentation
+      ? presentationSchema.safeParse(message.presentation)
+      : undefined;
+    const card = parsed?.success ? presentationText(parsed.data).trim() : '';
+    return [message.text.trim(), card].filter(Boolean).join('\n\n');
+  };
   const firstUser = messages.find((message) => message.role === 'user');
   const firstAnswer = messages.find(
-    (message) => message.role === 'assistant' && message.text.trim(),
+    (message) => message.role === 'assistant' && Boolean(messageText(message)),
   );
   const firstReplySeconds =
     firstUser && firstAnswer ? Math.max(0, (firstAnswer.at - firstUser.at) / 1000) : null;
   const replies = messages
-    .filter((m) => m.role === 'assistant' && m.text.trim())
-    .map((m) => m.text);
+    .filter((m) => m.role === 'assistant')
+    .map(messageText)
+    .filter(Boolean);
   const shown = messages.filter(
     (m) => m.role === 'assistant' && (m.text.trim() || m.presentation || m.attachments),
   );

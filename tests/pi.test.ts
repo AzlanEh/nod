@@ -4097,6 +4097,14 @@ test('send_message validates structured visuals and delivers each distinct prese
                 presentation: { ...items, pick, items: [1, 2, 3, 4, 5, 6, 7].map(row) },
               }),
             );
+            await assert.rejects(
+              send.execute({
+                text: '',
+                intent: 'final',
+                presentation: { ...items, pick, items: [1, 2].map(row) },
+              }),
+              /cannot use intent "final"/,
+            );
             assert.equal(replies.length, 0);
             await send.execute({
               text: '',

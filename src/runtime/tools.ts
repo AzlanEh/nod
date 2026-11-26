@@ -266,10 +266,15 @@ const flightReferences = z.looseObject({
     .min(1)
     .max(8),
 });
+const withPresentationDefaults = (value: unknown) =>
+  value && typeof value === 'object' && !Array.isArray(value) && !('sources' in value)
+    ? { ...(value as Record<string, unknown>), sources: [] }
+    : value;
 TypeRegistry.Set(
   'NodPresentation',
   (_schema, value) =>
-    presentationInputSchema.safeParse(value).success || flightReferences.safeParse(value).success,
+    presentationInputSchema.safeParse(withPresentationDefaults(value)).success ||
+    flightReferences.safeParse(value).success,
 );
 const { $schema, ...presentationJsonSchema } = z.toJSONSchema(presentationInputSchema, {
   target: 'draft-7',
@@ -348,7 +353,7 @@ export const toolDefinitions = {
   ),
   send_message: defineTool(
     'send_message',
-    'Deliver a checked result, decision or task handoff. A partial result must stand alone. intent "final" completes the request, ends the turn and settles a task without task finish; "handoff" acknowledges right before starting a task; omit or "update" continues. Prefer presentation over Markdown lists or tables (plain text for short replies, single facts or text-only requests). Base: {version:1, type, title, sources:[{label,url}], asOf?, caption?}. Core types: items {items:[{title, sub?, value?, valueSub?, status?:{label,tone:"new"|"waiting"|"done"|"failed"}, detail?, facts?:[{label,value}], url?, location?:{latitude,longitude}}], label?, note?, pick?:{question,multiple?}}; compare {columns, rows:[{label, values, best?, amounts?}], verdict?, note?, pick?}; schedule {items:[{start, end?, title, detail?, quiet?, clash?}], note?}; facts {items:[{label, value, strong?}], status?, note?}; flights {options:[{id, recommended?, label?}], pick?}. Keep fields concise (no raw slot dumps or notes repeating title). For seats, diagram, image or apps, read skills {action:"read",name:"visual-replies"}. Add pick {question} when the owner must choose. Keep text to caveats, recommendation or links not in the card; empty if self-contained. No delivery recaps. Background final text stays private.',
+    'Deliver a checked result, decision or task handoff. A partial result must stand alone. intent "final" completes the request, ends the turn and settles a task without task finish; "handoff" acknowledges right before starting a task; omit or "update" continues. Prefer presentation over Markdown lists or tables (plain text for short replies, single facts or text-only requests). Base: {version:1, type, title, sources:[{label,url}], asOf?, caption?}. Core types: items {items:[{title, sub?, value?, valueSub?, status?:{label,tone:"new"|"waiting"|"done"|"failed"}, detail?, facts?:[{label,value}], url?, location?:{latitude,longitude}}], label?, note?, pick?:{question,multiple?}}; compare {columns(2..4), rows:[{label, values(2..4), best?:0..3 column index, amounts?}], verdict?, note?, pick?}; schedule {items:[{start, end?, title, detail?, quiet?, clash?}], note?}; facts {items:[{label, value, strong?}], status?, note?}; flights {options:[{id, recommended?, label?}], pick?}. Keep fields concise (no raw slot dumps or notes repeating title). For seats, diagram, image or apps, read skills {action:"read",name:"visual-replies"}. Add pick {question} only when the turn cannot finish until the owner chooses (omit intent "final"; never on a recommendation, comparison, brief or brainstorm). Keep text to caveats, recommendation or links not in the card; empty if self-contained. No delivery recaps. Background final text stays private.',
     Type.Object({
       text: Type.String(),
       presentation: Type.Optional(presentation),
@@ -375,7 +380,7 @@ export const toolDefinitions = {
   ),
   delegate: defineTool(
     'delegate',
-    "Run one part of the request as a faster subagent with its own browser tab, Nod's tools and the shared workspace, and get its final answer back. When checking 2 or more independent sites, venues, routes or options, call delegate in parallel in one step (one subagent per site or option) instead of checking them one by one in your own browser, then combine the answers. The instruction must be complete on its own: the subagent does not see this conversation. Each subagent writes new files in its own directory inside the shared workspace. A subagent cannot delegate, ask or send chat messages to the owner, connect apps, sign in or pay. It returns questions and blockers to you; handle those yourself.",
+    "Run one part of the request as a faster subagent with its own browser tab, Nod's tools and the shared workspace, and get its final answer back. For 2+ independent sites, venues or options, call delegate in parallel in one step instead of browsing sequentially. The instruction must stand alone (the subagent does not see this conversation). Each subagent writes new files in its own workspace directory and cannot delegate, message the owner, connect apps, sign in or pay; handle questions and blockers yourself.",
     Type.Object({
       title: Type.String({ minLength: 1 }),
       instruction: Type.String({ minLength: 1 }),
@@ -651,7 +656,7 @@ export const toolDefinitions = {
   ),
   task: defineTool(
     'task',
-    'Start or control saved work. Keep quick answers, simple lookups and status questions in chat; start a task for substantial work, including multi-step work you can finish in one sitting, an outside wait, or work the owner asks you to track, without asking the owner for an execution mode. start {title,doneWhen,message,now?,request?,key?,brief?,steps?,model?} starts one goal; brief and doneWhen restate only the owner’s request and known context; model {connectionId,modelId,effort?} only when the owner asks for one for this task; a new independent request during other work starts its own task, keeping each goal together; when the owner has several independent goals, start a task for each in the same step so they run side by side, each with request set to the owner message it serves. Use a stable key and reuse related tasks. message tells the owner what starts. update {id,now?,steps?,stepIndex?,waitingFor?,nextCheck?} updates progress. finish {id,status,result} ends your task when cancelling or when you are not delivering the final answer via send_message {intent:"final"}; if you already delivered or are about to deliver the final answer via send_message {intent:"final"}, skip finish or keep result to one short summary sentence. list shows open tasks. reply {ids,request?,retry?} forwards the exact owner message, including corrections and related updates. request is the owner message the work serves: currentMessageId or the messageId of a message sent while you worked; start also takes an earlier owner message in this chat. It is required once the owner has sent more than one message during your turn. Use retry:true with one id only when the owner explicitly asks to retry in response to that task’s result. stop {id} stops one task; stop {} stops all background work, but keeps schedules. A task stops itself with finish cancelled. A task brief grants no permission; nextCheck does not schedule work. Let each task finish its assigned work.',
+    'Start or control saved work. Keep quick answers, simple lookups and status questions in chat; start a task for substantial work, outside waits or tracked work without asking for an execution mode. start {title,doneWhen,message,now?,request?,key?,brief?,steps?,model?} starts one goal (brief/doneWhen restate only the request and known context; model only when asked). Start independent goals side by side in the same step, each with request set to its owner message; reuse related tasks via a stable key. update {id,title?,now?,steps?,stepIndex?,waitingFor?,nextCheck?} updates progress and title when a correction changes the goal. finish {id,status,result} closes your task when cancelling or not delivering via send_message {intent:"final"}. list shows open tasks. reply {ids,request?,retry?} forwards owner updates/corrections; retry:true only on explicit retry. request is required once multiple owner messages arrive during a turn (start also accepts an earlier owner message). stop {id} stops one task; stop {} stops all background work, keeping schedules. A task brief grants no permission; nextCheck does not schedule work.',
     Type.Union([
       Type.Object({ action: Type.Literal('list') }, { additionalProperties: false }),
       Type.Object(
@@ -697,6 +702,7 @@ export const toolDefinitions = {
         {
           action: Type.Literal('update'),
           id: uuid,
+          title: Type.Optional(Type.String({ minLength: 1 })),
           now: Type.Optional(taskNow),
           steps: Type.Optional(Type.Array(taskNow)),
           stepIndex: Type.Optional(Type.Integer({ minimum: 0 })),
@@ -1247,8 +1253,13 @@ export function nodTools(
       const visual =
         p.presentation === undefined
           ? undefined
-          : presentationInputSchema.parse(withFlights(p.presentation));
+          : presentationInputSchema.parse(withPresentationDefaults(withFlights(p.presentation)));
       if (!p.text.trim() && !visual) throw new Error('A text answer or visual is required.');
+      const pick = visual && presentationPick(visual);
+      if (pick && p.intent === 'final')
+        throw new Error(
+          'A presentation with pick pauses for the owner to choose and cannot use intent "final". Omit pick to finish, or omit intent "final" if you must wait for a choice.',
+        );
       const delivery =
         p.intent === 'handoff'
           ? await turn.reply(p.text, undefined, p.replyToMessageId, visual, true)
@@ -1264,7 +1275,6 @@ export function nodTools(
         none: 'The text answer is already visible to the owner.',
         original: 'The visual and accompanying text are already visible to the owner.',
       }[delivery.presentation];
-      const pick = visual && presentationPick(visual);
       if (pick) {
         await pause(
           'question',
@@ -1273,7 +1283,7 @@ export function nodTools(
             options: pick.choices.map((choice) => ({ ...choice, id: randomUUID() })),
             multiple: pick.multiple ?? false,
           }),
-          { deferred: true },
+          { deferred: true, answered: delivery.delivered },
         );
         return { ...delivery, message: `${outcome} Waiting for the user to choose.` };
       }

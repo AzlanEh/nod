@@ -278,7 +278,7 @@ export function createTrust(options: {
       (answer as { run?: unknown } | undefined)?.run !== false
     )
       throw new Error(
-        "The trust check couldn't decide this action, so it didn't run and the owner wasn't asked. Nothing was sent or changed. You can try again.",
+        "The trust check couldn't decide this action, so it didn't run and the owner wasn't asked. Nothing was sent or changed.",
       );
     return {
       confirm: true,
