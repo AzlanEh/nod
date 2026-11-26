@@ -68,9 +68,7 @@ export function lightestEffort(efforts: ModelEffort[]) {
 }
 
 export function checkEffort(efforts: ModelEffort[]) {
-  return (
-    (['medium', 'low', 'minimal'] as const).find((level) => efforts.includes(level)) ?? efforts[0]
-  );
+  return efforts.includes('medium') ? 'medium' : efforts[0];
 }
 
 export function lighterEffort(efforts: ModelEffort[], current: ModelEffort): ModelEffort {
