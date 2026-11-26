@@ -1,5 +1,9 @@
 import { laterSupersedingTurnSql } from './turn-chain.ts';
-import { presentationSchema, presentationText } from '../shared/presentation.ts';
+import {
+  presentationImages,
+  presentationSchema,
+  presentationText,
+} from '../shared/presentation.ts';
 import { answerChoicesSchema, questionWithChoices } from '../shared/answer-choices.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import type { Artifact, SubmitMessageResponse } from '../shared/contracts.ts';
@@ -1371,16 +1375,30 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
       await block('message_changed');
       return true;
     }
+    const visual = presentationSchema.safeParse(row.message_presentation);
+    const presentationImageIds = new Set(
+      visual.success ? presentationImages(visual.data).map((image) => image.artifactId) : [],
+    );
+    const rowAttachments = (row.attachments ?? []).filter(
+      (item) =>
+        !(
+          item &&
+          typeof item === 'object' &&
+          'id' in item &&
+          typeof item.id === 'string' &&
+          presentationImageIds.has(item.id)
+        ),
+    );
     let attachments: MessagingAttachment[] | undefined;
     const canDeliverAttachments = channels.find(
       (channel) => channel.id === row.provider,
     )?.supportsAttachments;
-    if (row.attachments?.length) {
+    if (rowAttachments.length) {
       try {
         const requested = z
           .array(z.object({ id: z.uuid() }))
           .min(1)
-          .parse(row.attachments);
+          .parse(rowAttachments);
         const unique = [...new Map(requested.map((item) => [item.id, item])).values()];
         if (!options.resolveAttachments || !row.message_thread_id)
           throw new Error('Attachment delivery is unavailable.');
@@ -1406,14 +1424,13 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
                 ...row.presentation,
                 attachments: attachments
                   ? ('pending' as const)
-                  : row.attachments?.length
+                  : rowAttachments.length
                     ? ('in_nod' as const)
                     : ('none' as const),
               }
             : row.presentation;
         generated = await presentChannelText(row.message_thread_id, input, options.present);
       }
-      const visual = presentationSchema.safeParse(row.message_presentation);
       const fallback = visual.success ? channelText(presentationText(visual.data)).text : '';
       const choices = answerChoicesSchema.safeParse(row.answer_choices);
       const question = generated ?? row.text;
@@ -1421,7 +1438,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
         choices.success ? questionWithChoices(question, choices.data) : question,
         {
           threadId: row.message_thread_id,
-          hasAttachments: !row.presentation && Boolean(row.attachments?.length),
+          hasAttachments: !row.presentation && Boolean(rowAttachments.length),
           deliversAttachments: !row.presentation && Boolean(attachments),
           browserHandoff: row.browser_handoff,
           present: options.present,

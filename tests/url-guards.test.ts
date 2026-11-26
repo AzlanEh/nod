@@ -321,10 +321,11 @@ test('card pictures read only the page head, recheck the picture address and map
   let hang = true;
   let waiting = 0;
   let reached = () => {};
+  let finishTile = () => {};
   const bothWaiting = new Promise<void>((resolve) => (reached = resolve));
   const stoppable = createPublicLinkPreviewProvider({
     resolver: addresses,
-    request: ({ signal }) => {
+    request: ({ url, signal }) => {
       if (!hang)
         return Promise.resolve({
           status: 200,
@@ -332,14 +333,26 @@ test('card pictures read only the page head, recheck the picture address and map
           body: png,
         });
       if (++waiting === 2) reached();
+      if (url.hostname === 'tile.openstreetmap.org')
+        return new Promise((resolve, reject) => {
+          finishTile = () =>
+            resolve({
+              status: 200,
+              headers: { 'content-type': 'image/png' },
+              body: png,
+            });
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
       return new Promise((_, reject) =>
         signal.addEventListener('abort', () => reject(signal.reason), { once: true }),
       );
     },
   });
   const stop = new AbortController();
+  const second = new AbortController();
   const started = Date.now();
   const stopped = stoppable.mapTile!(2, 1, 1, stop.signal);
+  const shared = stoppable.mapTile!(2, 1, 1, second.signal);
   const picture = stoppable.image!('https://example.com/a.png', stop.signal);
   await bothWaiting;
   stop.abort();
@@ -347,6 +360,8 @@ test('card pictures read only the page head, recheck the picture address and map
   assert.equal(await picture, null);
   assert.ok(Date.now() - started < 1000);
   assert.equal(await stoppable.mapTile!(2, 1, 1, AbortSignal.abort()), null);
+  finishTile();
+  assert.ok(await shared);
   hang = false;
   assert.ok(await stoppable.mapTile!(2, 1, 1));
 });

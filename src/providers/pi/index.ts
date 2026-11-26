@@ -1244,19 +1244,21 @@ export function createPiAgent(options: {
         const tool = input.tools.find((item) => item.early && item.name === call.name);
         const definition = tools.find((item) => item.name === call.name);
         if (!tool || !definition || !activation?.getActiveTools().includes(call.name)) return;
-        if (
-          message.content
-            .slice(0, index)
-            .some((part) => part.type === 'toolCall' && !early.has(part.id))
-        )
-          return;
+        const earlier = message.content
+          .slice(0, index)
+          .filter(
+            (part): part is Extract<typeof part, { type: 'toolCall' }> => part.type === 'toolCall',
+          );
+        if (earlier.some((part) => !early.has(part.id))) return;
         let args: Record<string, unknown>;
         try {
           args = structuredClone(validateToolArguments(definition, call));
         } catch {
           return;
         }
-        const started = tool.execute(args, { nested: call.id.includes('/') });
+        const previous = earlier.length ? early.get(earlier.at(-1)!.id) : undefined;
+        const run = () => tool.execute(args, { nested: call.id.includes('/') });
+        const started = previous ? previous.then(run, run) : run();
         started.catch(() => undefined);
         early.set(call.id, started);
       };

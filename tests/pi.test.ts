@@ -3519,6 +3519,58 @@ test('a paused turn cannot start a subagent still preparing and failed children 
   }
 });
 
+test('a subagent returns partial findings when capped at its step limit', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'nod-delegate-cap-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  let delegated = '';
+  const runtime = createAgentRuntime({
+    agent: {
+      open: async (input) => {
+        const child = Boolean(input.ephemeral);
+        return {
+          resumed: false,
+          abort() {},
+          dispose() {},
+          prompt: async () => {
+            if (!child) {
+              const delegate = input.tools.find((tool) => tool.name === 'delegate')!;
+              const result = await delegate.execute({
+                title: 'Collect synthetic facts',
+                instruction: 'Gather facts and report back.',
+              });
+              delegated = result.content.find((part) => part.type === 'text')!.text;
+              return;
+            }
+            const browser = input.tools.find((tool) => tool.name === 'browser')!;
+            for (let step = 1; step <= 6; step++) {
+              await browser.execute({ action: 'open', url: `https://example.com/step-${step}` });
+              assert.equal(input.shouldStop([{ name: 'browser' }]), false);
+            }
+            await assert.rejects(
+              browser.execute({ action: 'open', url: 'https://example.com/step-7' }),
+              /No tool steps are left/,
+            );
+            assert.equal(input.shouldStop([{ name: 'browser', error: 'spent' }]), true);
+          },
+        };
+      },
+      dispose() {},
+    },
+    computer: fakeComputer({
+      act: async (_id, step) => ({
+        url: step.url ?? 'https://example.com',
+        text: `Synthetic finding from ${step.url}`,
+      }),
+    }),
+    workspace: fakeWorkspace(),
+  });
+  t.after(() => runtime.dispose());
+  const result = await runtime.runTurn({ ...context(directory), turnId: randomUUID() });
+  assert.equal(result.status, 'succeeded');
+  assert.match(delegated, /Partial findings before stopping/);
+  assert.match(delegated, /Synthetic finding from https:\/\/example\.com\/step-6/);
+});
+
 test('runtime shutdown drains tasks and releases every capability after adapter failures', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'nod-disposal-failure-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -4168,7 +4220,11 @@ test('send_message validates structured visuals and delivers each distinct prese
     const sent =
       'Synthetic total is about 2,286 units. These use the latest synthetic reference figures from yesterday, and two other feeds agree within a small margin. Your provider will add its own markup, so expect a little less.';
     for (const [restated, posted] of [
-      [sent.replace('markup, so expect a little', 'fee, so expect a bit'), [sent]],
+      [
+        'Synthetic total is about 2,286 units. These use the latest synthetic reference figures from yesterday.',
+        [sent],
+      ],
+      [sent.replace('agree', 'disagree'), [sent, sent.replace('agree', 'disagree')]],
       [sent.replace('2,286', '2,296'), [sent, sent.replace('2,286', '2,296')]],
     ] as const) {
       const replies: Array<Parameters<RuntimeContext['reply']>> = [];
@@ -4510,6 +4566,121 @@ test('send_message validates structured visuals and delivers each distinct prese
     assert.match(sent, /without sending this card again/);
     assert.equal(result.status, 'succeeded');
   });
+
+  await t.test(
+    'an unquoted burst reply clears owed messages and waiting reply targets stay scoped to picks',
+    async (t) => {
+      const firstId = randomUUID();
+      const secondId = randomUUID();
+      let taken = false;
+      const runtime = createAgentRuntime({
+        agent: {
+          open: async (input) => ({
+            resumed: false,
+            abort() {},
+            dispose() {},
+            prompt: async () => {
+              await input.nextMessages!();
+              const send = input.tools.find((tool) => tool.name === 'send_message')!;
+              await send.execute({ text: 'Answered both synthetic updates together.' });
+              await input.tools
+                .find((tool) => tool.name === 'ask_user')!
+                .execute({ question: 'Which synthetic slot?' });
+            },
+          }),
+          dispose() {},
+        },
+        computer: fakeComputer(),
+        workspace: fakeWorkspace(),
+      });
+      t.after(() => runtime.dispose());
+      const burstResult = await runtime.runTurn({
+        ...context(directory),
+        turnId: randomUUID(),
+        prompt: 'Plan the synthetic meeting',
+        takeMessages: async () =>
+          taken
+            ? []
+            : ((taken = true),
+              [
+                { id: firstId, text: 'Make it Tuesday', attachments: [] },
+                { id: secondId, text: 'Actually Wednesday', attachments: [] },
+              ]),
+        reply: async () => {},
+      });
+      assert.equal(burstResult.status, 'waiting_user');
+      assert.equal(burstResult.message, 'Which synthetic slot?');
+      assert.equal(burstResult.replyToMessageId, undefined);
+
+      const pickTarget = randomUUID();
+      const pickRuntime = createAgentRuntime({
+        agent: {
+          open: async (input) => ({
+            resumed: false,
+            abort() {},
+            dispose() {},
+            prompt: async () => {
+              const send = input.tools.find((tool) => tool.name === 'send_message')!;
+              await send.execute({
+                text: 'Synthetic options.',
+                intent: 'update',
+                replyToMessageId: pickTarget,
+                presentation: {
+                  ...items,
+                  pick: { question: 'Which one?' },
+                  items: [{ title: 'Option 1' }, { title: 'Option 2' }],
+                },
+              });
+              input.shouldStop([{ name: 'send_message' }]);
+            },
+          }),
+          dispose() {},
+        },
+        computer: fakeComputer(),
+        workspace: fakeWorkspace(),
+      });
+      t.after(() => pickRuntime.dispose());
+      const pickResult = await pickRuntime.runTurn({
+        ...context(directory),
+        turnId: randomUUID(),
+        reply: async () => {},
+      });
+      assert.equal(pickResult.status, 'waiting_user');
+      assert.equal(pickResult.replyToMessageId, pickTarget);
+
+      const unrelatedTarget = randomUUID();
+      const unrelatedRuntime = createAgentRuntime({
+        agent: {
+          open: async (input) => ({
+            resumed: false,
+            abort() {},
+            dispose() {},
+            prompt: async () => {
+              const send = input.tools.find((tool) => tool.name === 'send_message')!;
+              await send.execute({
+                text: 'Answered the earlier message.',
+                replyToMessageId: unrelatedTarget,
+              });
+              await input.tools
+                .find((tool) => tool.name === 'ask_user')!
+                .execute({ question: 'Need another detail?' });
+            },
+          }),
+          dispose() {},
+        },
+        computer: fakeComputer(),
+        workspace: fakeWorkspace(),
+      });
+      t.after(() => unrelatedRuntime.dispose());
+      const unrelatedResult = await unrelatedRuntime.runTurn({
+        ...context(directory),
+        turnId: randomUUID(),
+        reply: async () => {},
+      });
+      assert.equal(unrelatedResult.status, 'waiting_user');
+      assert.equal(unrelatedResult.replyToMessageId, undefined);
+    },
+  );
 });
 
 const chatgptHostId = '6f1c2f4e-3b8a-4d2e-9c51-0a7e2b9d4f10';
@@ -8906,6 +9077,122 @@ test('a chat answer posts as soon as its call is written, before the rest of the
   assert.equal(writtenBeforeReply, false);
   assert.deepEqual(replies, ['There are 604,800 seconds in a week.', 'The plan is saved.']);
   assert.equal(scripts.filter((script) => script.includes('fixture-write-plan')).length, 1);
+});
+
+test('consecutive early send_message calls execute sequentially in order', async (t) => {
+  const { createServer } = await import('node:http');
+  const directory = await mkdtemp(join(tmpdir(), 'nod-pi-early-order-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  let requests = 0;
+  const server = createServer((request, response) => {
+    request.resume();
+    request.on('end', () => {
+      requests++;
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+      const send = (...events: Array<Record<string, unknown>>) => {
+        for (const event of events)
+          response.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+      };
+      const tool = (index: number, id: string, name: string, input: Record<string, unknown>) => [
+        {
+          type: 'content_block_start',
+          index,
+          content_block: { type: 'tool_use', id, name, input: {} },
+        },
+        {
+          type: 'content_block_delta',
+          index,
+          delta: { type: 'input_json_delta', partial_json: JSON.stringify(input) },
+        },
+        { type: 'content_block_stop', index },
+      ];
+      send({
+        type: 'message_start',
+        message: {
+          id: `msg_${requests}`,
+          type: 'message',
+          role: 'assistant',
+          content: [],
+          model: 'fixture-anthropic',
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 100, output_tokens: 0 },
+        },
+      });
+      if (requests === 1) {
+        send(
+          ...tool(0, 'toolu_first', 'send_message', { text: 'First early answer.' }),
+          ...tool(1, 'toolu_second', 'send_message', { text: 'Second early answer.' }),
+        );
+        send(
+          {
+            type: 'message_delta',
+            delta: { stop_reason: 'tool_use', stop_sequence: null },
+            usage: { output_tokens: 40 },
+          },
+          { type: 'message_stop' },
+        );
+      } else {
+        send(
+          {
+            type: 'message_delta',
+            delta: { stop_reason: 'end_turn', stop_sequence: null },
+            usage: { output_tokens: 1 },
+          },
+          { type: 'message_stop' },
+        );
+      }
+      response.end();
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const url = 'http://127.0.0.1:' + (server.address() as import('node:net').AddressInfo).port;
+  const access = smallContextAccess('compatible', 'fixture-anthropic', 200_000);
+  access.provider = 'anthropic';
+  access.read = async () => ({ type: 'api_key', key: 'synthetic-key' });
+  access.definition.spec = {
+    ...access.definition.spec,
+    provider: 'anthropic',
+    api: 'anthropic-messages',
+    baseUrl: url,
+  };
+  const agent = createPiAgent({
+    provider: 'anthropic',
+    sessionRoot: join(directory, 'sessions'),
+    resolve: async () => access,
+  });
+  const runtime = createAgentRuntime({
+    agent,
+    computer: fakeComputer(),
+    workspace: fakeWorkspace(),
+  });
+  t.after(() => runtime.dispose());
+  const events: string[] = [];
+  let inFlight = 0;
+  let maxConcurrent = 0;
+  const result = await runtime.runTurn({
+    ...context(directory),
+    sessionId: 'fixture-early-order',
+    turnId: randomUUID(),
+    prompt: 'Send two quick answers.',
+    reply: async (text) => {
+      inFlight++;
+      maxConcurrent = Math.max(maxConcurrent, inFlight);
+      events.push(`start:${text}`);
+      await setTimeout(text.includes('First') ? 30 : 5);
+      events.push(`end:${text}`);
+      inFlight--;
+    },
+  });
+  assert.equal(result.status, 'succeeded');
+  assert.equal(maxConcurrent, 1);
+  assert.deepEqual(events, [
+    'start:First early answer.',
+    'end:First early answer.',
+    'start:Second early answer.',
+    'end:Second early answer.',
+  ]);
 });
 
 test('a chat answer posted before its model request fails is not sent again by a retry', async (t) => {

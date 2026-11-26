@@ -25,7 +25,7 @@ export interface Turn {
     reason: 'question' | 'approval' | 'credentials' | 'browser',
     message?: string,
     answerChoices?: AnswerChoices,
-    options?: { deferred?: boolean; answered?: boolean },
+    options?: { deferred?: boolean; answered?: boolean; replyToMessageId?: string },
   ): Promise<boolean>;
   checkInCost?(): { spent: string; plan: string } | undefined;
   confirm(result: unknown): Promise<unknown>;

@@ -2722,6 +2722,55 @@ test('browser steps run in order, stop at stale refs, unmet waits, failures and 
   assert.match(outputs[5]!, /untrusted_tool_result/);
   assert.doesNotMatch(outputs[6]!, /untrusted_tool_result/);
   assert.equal(turn.result.status, 'waiting_user');
+
+  const queryActed: string[] = [];
+  let queryUrl = 'https://example.com/results?page=1';
+  const queryOutputs: string[] = [];
+  await fixture(
+    async (tools) => {
+      queryOutputs.push(
+        text(
+          await call(tools, 'browser', {
+            action: 'steps',
+            steps: [
+              { action: 'click', selector: '#page2' },
+              { action: 'click', selector: '@e4' },
+            ],
+          }),
+        ),
+      );
+      queryOutputs.push(
+        text(
+          await call(tools, 'browser', {
+            action: 'steps',
+            steps: [
+              { action: 'click', selector: '#hash' },
+              { action: 'click', selector: '@e5' },
+            ],
+          }),
+        ),
+      );
+    },
+    {},
+    {
+      computer: fakeComputer({
+        currentPage: async () => ({
+          origin: 'https://example.com',
+          url: queryUrl,
+          controls: [],
+        }),
+        act: async (_id, step) => {
+          queryActed.push(`${step.action} ${step.selector ?? ''}`.trim());
+          if (step.selector === '#page2') queryUrl = 'https://example.com/results?page=2';
+          if (step.selector === '#hash') queryUrl = 'https://example.com/results?page=2#details';
+          return { url: queryUrl, text: `Synthetic page at ${queryUrl}` };
+        },
+      }),
+    },
+  );
+  assert.deepEqual(queryActed, ['click #page2', 'click #hash']);
+  assert.match(queryOutputs[0]!, /Stopped before Step 2 \(click\)/);
+  assert.match(queryOutputs[1]!, /Stopped before Step 2 \(click\)/);
 });
 
 test('browser handoff requires a live page, binds its session and stops further work without a link', async () => {

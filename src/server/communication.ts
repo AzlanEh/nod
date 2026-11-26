@@ -225,6 +225,8 @@ function backgroundBoundary(background?: { turnId: string; sessionId: string }) 
   return background
     ? `AND m.created_at <= (SELECT created_at FROM turns WHERE owner_id=$1 AND thread_id=$2 AND id=$3)
        AND (u.id IS NULL OR u.session_id=$4
+         OR m.id=(SELECT message_id FROM turns WHERE owner_id=$1 AND thread_id=$2 AND id=$3)
+         OR u.id=(SELECT parent_turn_id FROM turns WHERE owner_id=$1 AND thread_id=$2 AND id=$3)
          OR (u.status IN ('succeeded','failed','cancelled')
              AND u.finished_at <= (SELECT created_at FROM turns WHERE owner_id=$1 AND thread_id=$2 AND id=$3)))`
     : '';
