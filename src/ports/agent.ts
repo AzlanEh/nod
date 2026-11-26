@@ -215,6 +215,7 @@ export interface RuntimeContext {
   ): Promise<unknown>;
   browserStep?(
     request: BrowserStep,
+    admit?: (asks: boolean, read?: boolean) => Promise<void>,
   ): Promise<
     | 'run'
     | 'refused'

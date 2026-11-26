@@ -345,6 +345,7 @@ export interface ThreadDependencies {
     turn: TurnRef,
     request: BrowserStep,
     signal: AbortSignal,
+    admit?: (asks: boolean, read?: boolean) => Promise<void>,
   ) => ReturnType<NonNullable<RuntimeContext['browserStep']>>;
   reactToMessage?: (
     input: AgentReactionInput,
@@ -2853,23 +2854,25 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
           connections(action, service, ref, proposal, newAccount, query, connectionId),
         ),
       requestCredential: fenced((input) => dependencies.requestCredential(ref, input)),
-      browserStep: fenced((request: BrowserStep) =>
-        dependencies.browserStep(
-          ref,
-          request.step.action === 'upload' && taskContext
-            ? {
-                ...request,
-                step: {
-                  ...request.step,
-                  path: posix.resolve(
-                    `/workspace/${threadId}/tasks/${taskContext.id}`,
-                    request.step.path,
-                  ),
-                },
-              }
-            : request,
-          signal,
-        ),
+      browserStep: fenced(
+        (request: BrowserStep, admit?: (asks: boolean, read?: boolean) => Promise<void>) =>
+          dependencies.browserStep(
+            ref,
+            request.step.action === 'upload' && taskContext
+              ? {
+                  ...request,
+                  step: {
+                    ...request.step,
+                    path: posix.resolve(
+                      `/workspace/${threadId}/tasks/${taskContext.id}`,
+                      request.step.path,
+                    ),
+                  },
+                }
+              : request,
+            signal,
+            admit,
+          ),
       ),
       ...(dependencies.requestPayment
         ? {

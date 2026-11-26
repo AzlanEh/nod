@@ -18,6 +18,7 @@ import type {
   AgentTool,
   AgentToolOutcome,
   AgentToolResult,
+  BrowserStep,
   Documentation,
   ModelFailure,
   RuntimeContext,
@@ -1016,6 +1017,20 @@ export function createAgentRuntime(dependencies: {
               context.memoryBrief = undefined;
             return result;
           },
+          ...(context.browserStep
+            ? {
+                browserStep: (request: BrowserStep) =>
+                  context.browserStep!(
+                    request,
+                    admissions.getStore()?.admit ??
+                      (async (asks: boolean) => {
+                        if (!asks) return;
+                        answerFirst();
+                        await readFirst();
+                      }),
+                  ),
+              }
+            : {}),
         },
         computer: browser,
         reply: async (

@@ -2392,7 +2392,8 @@ async function initializeApplication(
   payments = await createPayments(pool, {
     ownerId,
     analytics: captureAnalytics,
-    present: (turn, input) => communication.presentPayment(turn.threadId, input),
+    present: (turn, input) =>
+      communication.presentPayment(turn.threadId, input, undefined, turn.turnId),
     uses: vault.uses,
     page: (threadId) => computer.currentPage(threadId),
     destinations: (threadId, fields) => computer.cardDestinations(threadId, fields),
@@ -2623,13 +2624,18 @@ async function initializeApplication(
         const turn = args[2];
         try {
           if (!turn) throw new Error('The connection needs an active conversation.');
-          const message = await communication.present(turn.threadId, {
-            kind: 'connection',
-            app: result.name,
-            operation: 'operation' in result ? result.operation : 'connect',
-            ...('account' in result ? { account: result.account } : {}),
-            next: 'complete_private_sign_in',
-          });
+          const message = await communication.present(
+            turn.threadId,
+            {
+              kind: 'connection',
+              app: result.name,
+              operation: 'operation' in result ? result.operation : 'connect',
+              ...('account' in result ? { account: result.account } : {}),
+              next: 'complete_private_sign_in',
+            },
+            undefined,
+            turn.turnId,
+          );
           return { ...result, message };
         } catch (error) {
           await integrations
@@ -2641,7 +2647,7 @@ async function initializeApplication(
           throw error;
         }
       },
-      browserStep: async (turn, request, signal) => {
+      browserStep: async (turn, request, signal, admit) => {
         const args = browserStepArgs(request);
         const verdict = await trust.check(turn, 'NOD_browser', args, signal);
         const prepareConfirmation = async () => {
@@ -2710,8 +2716,9 @@ async function initializeApplication(
           const handoff = await approvals.request(turn, 'NOD_browser', args, {
             allowed: true,
             prepareConfirmation,
-            admit: async (asks) => {
+            admit: async (asks, read) => {
               if (asks && request.subagent) throw new Error('A subagent cannot ask the owner.');
+              await admit?.(asks, read);
             },
             signal,
             run: async () => 'run',
@@ -2725,6 +2732,7 @@ async function initializeApplication(
         if (request.subagent) return 'refused';
         const result = await approvals.request(turn, 'NOD_browser', args, {
           signal,
+          admit,
           details: { reason: verdict.reason },
           prepareConfirmation,
         });

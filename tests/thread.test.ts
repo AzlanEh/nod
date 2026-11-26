@@ -2377,6 +2377,16 @@ test(
               anchor: 1,
             },
             {
+              prompt: 'Check my synthetic flight to Lisbon.',
+              prior: 'Let me know your flight details',
+              start: 'Checking your flight number for Lisbon',
+              expected: [
+                'Let me know your flight details',
+                'Checking your flight number for Lisbon',
+              ],
+              anchor: 1,
+            },
+            {
               prompt: 'Check the synthetic invoice due Friday.',
               prior: 'No, the synthetic invoice is due Friday.',
               start: 'Check the synthetic invoice due Friday.',
