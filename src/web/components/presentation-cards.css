@@ -208,7 +208,7 @@
   padding: 5px;
   border-radius: 9px;
   object-fit: contain;
-  background: #fff;
+  background: var(--surface-subtle);
 }
 span:is(.card-thumb, .card-contender-image) {
   background: var(--surface-subtle);
@@ -885,7 +885,7 @@ button.card-contender {
   padding: 10px;
   border-radius: 10px;
   object-fit: contain;
-  background: #fff;
+  background: var(--surface-subtle);
 }
 .card-compare th[data-winner] .card-contender {
   border-color: color-mix(in srgb, var(--primary) 45%, var(--border));

@@ -413,6 +413,7 @@ export function createAgentRuntime(dependencies: {
           choices?: Parameters<Turn['pause']>[2];
         }
       | undefined;
+    let pausePromise: Promise<void> | undefined;
     const commitPause = async (
       reason: Parameters<Turn['pause']>[0],
       message?: string,
@@ -1028,7 +1029,7 @@ export function createAgentRuntime(dependencies: {
           const chat = !context.taskContext && !handoff;
           const first = chat && !spoke;
           const delivery = await reply(text, id, replyToMessageId, presentation, handoff);
-          if (delivery.delivered && chat) {
+          if (delivery.delivered && chat && !partial) {
             spoke = true;
             spokeTo = replyToMessageId;
           }
@@ -1284,7 +1285,7 @@ export function createAgentRuntime(dependencies: {
             const pending = deferredPause;
             deferredPause = undefined;
             if (!results?.some((result) => result.error !== undefined)) {
-              void commitPause(pending.reason, pending.message, pending.choices);
+              pausePromise = commitPause(pending.reason, pending.message, pending.choices);
               return true;
             }
           }
@@ -1489,6 +1490,7 @@ export function createAgentRuntime(dependencies: {
         audio ? undefined : (observer?.stable ?? scheduled?.stable),
       );
       await pendingReplies;
+      await pausePromise;
       if (deferredPause && !stopped) {
         const pending = deferredPause;
         deferredPause = undefined;

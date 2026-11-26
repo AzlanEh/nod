@@ -440,7 +440,7 @@ export function MessageBubble({
     message.replyTo && !(message.role === 'assistant' && message.replyTo.role === 'assistant')
       ? message.replyTo
       : null;
-  const hasBubbleContent = Boolean(
+  const hasBubbleText = Boolean(
     visibleReply ||
     cardText?.lead ||
     pendingAudio ||
@@ -462,6 +462,8 @@ export function MessageBubble({
           ),
       )),
   );
+  const cardInRow = outsideCard && !hasBubbleText;
+  const hasBubbleContent = hasBubbleText || cardInRow;
   const [error, setError] = useState('');
   const [picked, setPicked] = useState<number | null>(null);
   const [sending, setSending] = useState(false);
@@ -477,6 +479,7 @@ export function MessageBubble({
   const openChosen = openChoices.findIndex(
     (choice) => chosenText !== undefined && choiceAnswerText([choice]) === chosenText,
   );
+  const openAnswered = openChoices.length > 0 && chosenText !== undefined;
   const pickChoices = openChoices.length ? openChoices : (pickOptions ?? []);
   const answered = openChoices.length
     ? openChosen >= 0
@@ -489,15 +492,15 @@ export function MessageBubble({
   const cardPick: CardPick | null = pickChoices.length
     ? {
         chosen: answered.length ? answered : picked === null ? [] : [picked],
-        sent: answered.length > 0 || Boolean(pickQuestion?.choiceAnswer) || sending,
+        sent: answered.length > 0 || openAnswered || Boolean(pickQuestion?.choiceAnswer) || sending,
         closed:
           !openChoices.length &&
           !pickQuestion!.answerChoicesPending &&
           !pickQuestion!.choiceAnswer &&
           !sending,
         disabled: openChoices.length
-          ? answersDisabled === true
-          : !pickQuestion!.answerChoicesPending || !onAnswer || answersDisabled === true,
+          ? answersDisabled === true || sending || openAnswered
+          : !pickQuestion!.answerChoicesPending || !onAnswer || answersDisabled === true || sending,
         label:
           pickedChoice &&
           (pickedChoice.description &&
@@ -505,10 +508,12 @@ export function MessageBubble({
             ? `${pickedChoice.label} ${pickedChoice.description.split(' · ')[0]}`
             : pickedChoice.label),
         choose(index) {
+          if (sending || openAnswered) return;
           setPicked(index);
           setError('');
         },
         send(written) {
+          if (sending || openAnswered) return;
           if (!written && !pickedChoice) return;
           const text = written || choiceAnswerText([pickedChoice!]);
           const outcome = openChoices.length
@@ -946,7 +951,7 @@ export function MessageBubble({
               {message.role === 'assistant' &&
                 !streaming &&
                 message.presentation &&
-                !outsideCard &&
+                (!outsideCard || cardInRow) &&
                 message.presentation.type !== 'apps' &&
                 message.presentation.type !== 'schedule-run' &&
                 (message.presentation.type === 'bug-report' ? (
@@ -1098,7 +1103,7 @@ export function MessageBubble({
         {message.role === 'assistant' &&
           !streaming &&
           message.presentation &&
-          (outsideCard || message.presentation.type === 'apps') && (
+          ((outsideCard && !cardInRow) || message.presentation.type === 'apps') && (
             <CardPickContext.Provider value={cardPick}>
               <MessagePresentation value={message.presentation} messageId={message.id} />
             </CardPickContext.Provider>

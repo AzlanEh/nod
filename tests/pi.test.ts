@@ -4245,6 +4245,108 @@ test('send_message validates structured visuals and delivers each distinct prese
     assert.equal(result.status, 'succeeded');
   });
 
+  await t.test('a draft presentation keeps its string status through normalization', async (t) => {
+    const replies: Array<Parameters<RuntimeContext['reply']>> = [];
+    const runtime = createAgentRuntime({
+      agent: {
+        open: async (input) => ({
+          resumed: false,
+          abort() {},
+          dispose() {},
+          prompt: async () => {
+            const send = input.tools.find((tool) => tool.name === 'send_message')!;
+            await send.execute({
+              text: '',
+              presentation: {
+                version: 1,
+                type: 'draft',
+                title: 'Draft reply',
+                to: ['sam@example.test'],
+                subject: 'Schedule update',
+                body: 'Synthetic draft body.',
+                status: 'draft',
+              },
+            });
+          },
+        }),
+        dispose() {},
+      },
+      computer: fakeComputer(),
+      workspace: fakeWorkspace(),
+    });
+    t.after(() => runtime.dispose());
+    const result = await runtime.runTurn({
+      ...context(directory),
+      turnId: randomUUID(),
+      reply: async (...args) => {
+        replies.push(args);
+      },
+    });
+    assert.equal(result.status, 'succeeded');
+    assert.equal(replies.length, 1);
+    assert.equal(replies[0][3]?.type, 'draft');
+    if (replies[0][3]?.type === 'draft') {
+      assert.equal(replies[0][3].status, 'draft');
+    }
+  });
+
+  await t.test(
+    'a card with pick awaits browser hold before finishing the turn',
+    { timeout: 3000 },
+    async (t) => {
+      const replies: Array<Parameters<RuntimeContext['reply']>> = [];
+      let releaseHold!: () => void;
+      const holdGate = new Promise<void>((resolve) => {
+        releaseHold = resolve;
+      });
+      const runtime = createAgentRuntime({
+        agent: {
+          open: async (input) => ({
+            resumed: false,
+            abort() {},
+            dispose() {},
+            prompt: async () => {
+              const browser = input.tools.find((tool) => tool.name === 'browser')!;
+              const send = input.tools.find((tool) => tool.name === 'send_message')!;
+              await browser.execute({ action: 'open', url: 'https://example.com' });
+              await send.execute({
+                text: '',
+                intent: 'update',
+                presentation: {
+                  ...items,
+                  pick: { question: 'Which option?' },
+                  items: [{ title: 'Option 1' }, { title: 'Option 2' }],
+                },
+              });
+              assert.equal(input.shouldStop([{ name: 'send_message' }]), true);
+              queueMicrotask(() => queueMicrotask(releaseHold));
+            },
+          }),
+          dispose() {},
+        },
+        computer: fakeComputer({
+          act: async () => ({ url: 'https://example.com', text: 'Synthetic page' }),
+          hold: async (_sessionId, keep) => {
+            if (keep) await holdGate;
+          },
+        }),
+        workspace: fakeWorkspace(),
+      });
+      t.after(() => runtime.dispose());
+      const result = await runtime.runTurn({
+        ...context(directory),
+        turnId: randomUUID(),
+        reply: async (...args) => {
+          replies.push(args);
+        },
+      });
+      assert.equal(replies.length, 1);
+      assert.equal(result.status, 'waiting_user');
+      assert.equal(result.message, 'Which option?');
+      assert.equal(result.answerChoices?.options.length, 2);
+    },
+  );
+
   await t.test('a delivered card with pick is not refused when messages are queued', async (t) => {
     const replies: Array<Parameters<RuntimeContext['reply']>> = [];
     let sent = '';

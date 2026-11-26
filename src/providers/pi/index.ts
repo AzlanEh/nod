@@ -1244,7 +1244,7 @@ export function createPiAgent(options: {
       };
       const startEarly = (message: AssistantMessage, index: number) => {
         const call = message.content[index];
-        if (call?.type !== 'toolCall' || early.has(call.id)) return;
+        if (call?.type !== 'toolCall' || early.has(call.id) || input.shouldStop()) return;
         const tool = input.tools.find((item) => item.early && item.name === call.name);
         const definition = tools.find((item) => item.name === call.name);
         if (!tool || !definition || !activation?.getActiveTools().includes(call.name)) return;

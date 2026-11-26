@@ -276,11 +276,13 @@ const coerceStatus = (value: unknown) => {
   const lower = label.toLowerCase();
   const tone = /fail|error|block|refus|declin|cancel|reject|overdue|missed/.test(lower)
     ? 'failed'
-    : /done|paid|sent|confirm|approv|complet|resolv|deliver|closed|settled/.test(lower)
-      ? 'done'
-      : /wait|pend|open|hold|schedul|review|progress/.test(lower)
-        ? 'waiting'
-        : 'new';
+    : /wait|pend|hold/.test(lower)
+      ? 'waiting'
+      : /done|paid|sent|confirm|approv|complet|resolv|deliver|closed|settled/.test(lower)
+        ? 'done'
+        : /open|schedul|review|progress/.test(lower)
+          ? 'waiting'
+          : 'new';
   return { label: clip(label, 40) as string, tone };
 };
 const safeHttpsUrl = (value: unknown) =>
@@ -310,7 +312,7 @@ const normalizePresentationInput = (value: unknown) => {
   }
   if (typeof record.title === 'string') record.title = clip(record.title.trim(), 120);
   if (typeof record.caption === 'string') record.caption = clip(record.caption.trim(), 300);
-  if (typeof record.status === 'string') {
+  if (typeof record.status === 'string' && record.type !== 'draft') {
     const coerced = coerceStatus(record.status);
     if (coerced) record.status = coerced;
     else delete record.status;
@@ -1477,7 +1479,10 @@ export function nodTools(
         await checked.record?.();
         return observed({ action }, page);
       }
-      if (action === 'steps') return steps(list ?? []);
+      if (action === 'steps') {
+        if (!list?.length) throw new Error('Give the steps to run as a non-empty steps list.');
+        return steps(list);
+      }
       const step = { action, ...rest } as BrowserAction;
       const done = await act(step);
       return 'output' in done ? done.output : observed(step, done.page, done.choice);

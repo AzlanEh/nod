@@ -902,21 +902,21 @@ export function flightItems(value: FlightsPresentation): ItemsPresentation {
       const airlines = new Set(
         option.journeys.flatMap((journey) => journey.segments.map((s) => s.airline)),
       ).size;
-      const journeys = option.journeys.map((journey) => ({
-        label: clip(journey.label, 80),
-        summary: clip(
-          [
-            journey.duration,
-            journey.segments.length > 1
-              ? changes(journey.segments.length - 1)
-              : !journey.segments[0]!.technicalStops?.length && 'Nonstop',
-          ]
-            .filter(Boolean)
-            .join(' · '),
-          120,
-        ),
-        legs: journey.segments.map((segment) => flightLeg(segment, airlines)),
-      }));
+      const journeys = option.journeys.map((journey) => {
+        const summary = [
+          journey.duration,
+          journey.segments.length > 1
+            ? changes(journey.segments.length - 1)
+            : !journey.segments[0]!.technicalStops?.length && 'Nonstop',
+        ]
+          .filter(Boolean)
+          .join(' · ');
+        return {
+          label: clip(journey.label, 80),
+          ...(summary ? { summary: clip(summary, 120) } : {}),
+          legs: journey.segments.map((segment) => flightLeg(segment, airlines)),
+        };
+      });
       const facts = [
         ...(option.bookingReference
           ? [{ label: 'Booking reference', value: option.bookingReference }]
@@ -933,14 +933,14 @@ export function flightItems(value: FlightsPresentation): ItemsPresentation {
               option.journeys.flatMap((journey) => journey.segments.map((s) => s.airline)),
             ),
           ].join(' + '),
-          160,
+          120,
         ),
         ...(sub ? { sub: clip(sub, 160) } : {}),
         ...(option.recommended && option.status !== 'booked' ? { badge: 'Best' } : {}),
         ...(option.status === 'booked'
           ? { status: { label: 'Booked', tone: 'done' as const } }
           : {}),
-        ...(option.price ? { value: option.price } : {}),
+        ...(option.price ? { value: clip(option.price, 40) } : {}),
         ...(connections.length
           ? {
               valueSub: clip(
@@ -963,7 +963,7 @@ export function flightItems(value: FlightsPresentation): ItemsPresentation {
               }
             : {}),
         },
-        ...(risks.length ? { warning: clip(risks.join('. '), 300) } : {}),
+        ...(risks.length ? { warning: clip(risks.join('. '), 200) } : {}),
         journeys,
         ...(facts.length ? { facts } : {}),
         ...(option.url ? { url: option.url } : {}),

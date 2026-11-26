@@ -244,6 +244,8 @@ export interface ThreadDependencies {
     input:
       | { kind: 'interrupted'; work?: string; outsideAction: boolean }
       | { kind: 'failed'; error: string; work?: string },
+    signal?: AbortSignal,
+    turnId?: string,
   ) => Promise<string>;
   observeTurn?: (
     turnId: string,
@@ -1739,6 +1741,8 @@ async function failTurn(
         error === interrupted
           ? { kind: 'interrupted', outsideAction: turn.outside_action, ...(work ? { work } : {}) }
           : { kind: 'failed', error, ...(work ? { work } : {}) },
+        undefined,
+        turnId,
       ).catch(() => undefined);
   const body =
     typeof presented === 'string' && presented.trim()
@@ -1947,25 +1951,35 @@ async function quickReplies(
         ).trim();
         if (!text || stop.aborted) return;
         const streamId = `quick:${row.message_id}`;
-        const posted = await transaction(async (client) => {
-          await lockThread(client);
-          const open = await client.query(
-            `SELECT 1 FROM turns q JOIN turns r ON r.id=$3 AND r.owner_id=q.owner_id AND r.status='running'
-             WHERE q.id=$1 AND q.owner_id=$2 AND q.status='queued'
-               AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.owner_id=q.owner_id AND m.stream_id=$4)`,
-            [row.id, ownerId, row.running_id, streamId],
-          );
-          if (!open.rowCount) return false;
-          await insertAssistantMessage(
-            client,
-            { threadId, turnId: row.running_id },
-            text,
-            [],
-            streamId,
-            null,
-          );
-          return true;
-        }, pool);
+        const posted = await withTurnLock(
+          { turnId: row.running_id, signal: stop },
+          async (client) => {
+            await lockThread(client);
+            const open = await client.query(
+              `SELECT 1 FROM turns q
+               WHERE q.id=$1 AND q.owner_id=$2 AND q.status='queued'
+                 AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.owner_id=q.owner_id AND m.stream_id=$3)`,
+              [row.id, ownerId, streamId],
+            );
+            if (!open.rowCount) return false;
+            await insertAssistantMessage(
+              client,
+              { threadId, turnId: row.running_id },
+              text,
+              [],
+              streamId,
+              null,
+            );
+            return true;
+          },
+        ).catch((error) => {
+          if (
+            stop.aborted ||
+            (error instanceof Error && error.message === 'This turn is no longer active.')
+          )
+            return false;
+          throw error;
+        });
         if (posted) refresh();
       } finally {
         quickReplying.delete(row.id);
@@ -2612,16 +2626,19 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
       if (extra.length) {
         sourceMessageId = extra.at(-1)!.id;
         ownerMessageIds.push(...extra.map((message) => message.id));
-        const lines = [initialPrompt, ...extra.map((message) => message.text)].filter((part) =>
-          part.trim(),
-        );
-        initialPrompt = lines.join('\n');
+        const parts = [{ text: initialPrompt, audioCaption: loaded.audioCaption }];
         for (const message of extra) {
           const loadedExtra = await loadMessage(message.id);
           loaded.uploads.push(...loadedExtra.uploads);
           loaded.inputAttachments.push(...loadedExtra.inputAttachments);
           loaded.voice ||= loadedExtra.voice;
+          loaded.replyTo ??= loadedExtra.replyTo;
+          parts.push({ text: message.text, audioCaption: loadedExtra.audioCaption });
         }
+        const join = (lines: string[]) => lines.filter((part) => part.trim()).join('\n');
+        initialPrompt = join(parts.map((part) => part.text));
+        if (parts.some((part) => part.audioCaption !== undefined))
+          loaded.audioCaption = join(parts.map((part) => part.audioCaption ?? part.text));
         refresh();
       }
     }

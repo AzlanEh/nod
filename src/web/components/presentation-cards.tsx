@@ -310,7 +310,7 @@ function List({ visual }: { visual: Visual<'items'> }) {
   const pinned = Boolean(located && located.length > 1);
   const gutter = pick ? 'choice' : dots ? 'dot' : pinned || visual.ranked ? 'index' : undefined;
   const usualDate = mostCommon(visual.items.map((item) => item.route?.from.note));
-  const pictured = visual.items.some((item) => item.image);
+  const hasImages = visual.items.some(pictured);
   return (
     <div className="card-band">
       {visual.label && <p className="card-label">{visual.label}</p>}
@@ -320,7 +320,7 @@ function List({ visual }: { visual: Visual<'items'> }) {
       <ul
         className="card-items"
         data-gutter={gutter}
-        data-pictured={pictured || undefined}
+        data-pictured={hasImages || undefined}
         data-settled={pick?.sent || undefined}
         data-closed={pick?.closed || undefined}
       >
@@ -342,7 +342,7 @@ function List({ visual }: { visual: Visual<'items'> }) {
               <Picture
                 item={item}
                 className="card-thumb"
-                keepSpace={pictured}
+                keepSpace={hasImages}
                 logo={Boolean(item.route)}
               />
               <span className="card-main">
@@ -770,7 +770,12 @@ export function Compare({ visual }: { visual: Visual<'compare'> }) {
                       <span className="card-contender-text">
                         <span className="card-title">
                           {column.url && !pick ? (
-                            <a href={column.url} target="_blank" rel="noreferrer">
+                            <a
+                              href={column.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              referrerPolicy="no-referrer"
+                            >
                               {column.label}
                             </a>
                           ) : (
@@ -877,7 +882,13 @@ export function Draft({ visual }: { visual: Visual<'draft'> }) {
         action={{ label: draftSendLabel, icon: <Send size={14} aria-hidden="true" /> }}
       >
         {visual.open && (
-          <a className="card-draft-open" href={visual.open} target="_blank" rel="noreferrer">
+          <a
+            className="card-draft-open"
+            href={visual.open}
+            target="_blank"
+            rel="noopener noreferrer"
+            referrerPolicy="no-referrer"
+          >
             Open{visual.via ? ` in ${visual.via}` : ''}
             <ExternalLink size={14} aria-hidden="true" />
           </a>
