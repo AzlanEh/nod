@@ -3164,7 +3164,7 @@ test('a question waits until messages queued during the step are read', async (t
   assert.equal(result.status, 'waiting_user');
 });
 
-test('sign-in and saved-session approvals wait until queued messages are read', async (t) => {
+test('sign-in and payment approvals wait until queued messages are read', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'nod-read-first-sign-in-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const outputs: string[] = [];
@@ -3193,21 +3193,22 @@ test('sign-in and saved-session approvals wait until queued messages are read', 
               replyToMessageId: steered.at(-1),
             });
           };
-          const session = {
-            action: 'use',
-            url: 'https://example.com',
-            connectionId: randomUUID(),
-          };
-          await run('sign_in', {
+          const signIn = {
             origin: 'https://example.com',
             label: 'Synthetic login',
             message: 'Sign in privately.',
             action: 'Sign in',
+          };
+          await run('sign_in', signIn);
+          await read();
+          await run('pay', {
+            amount: '10.00',
+            currency: 'EUR',
+            submitSelector: '#pay',
+            fields: { number: '#card-num', securityCode: '#card-cvc', expiry: '#card-exp' },
           });
           await read();
-          await run('browser_session', session);
-          await read();
-          await run('browser_session', session);
+          await run('sign_in', signIn);
         },
       }),
       dispose() {},
@@ -3231,9 +3232,9 @@ test('sign-in and saved-session approvals wait until queued messages are read', 
       await admit?.(true);
       return { [appConfirmation]: 'Sign in to the synthetic site?' };
     },
-    browserConnection: async (_request, admit) => {
+    requestPayment: async (_input, admit) => {
       await admit?.(true);
-      return { [appConfirmation]: 'Use the saved synthetic session?' };
+      return { question: 'Approve the synthetic payment?', action: 'Pay' };
     },
     reply: async () => {},
   });

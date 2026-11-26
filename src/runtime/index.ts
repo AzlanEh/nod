@@ -18,7 +18,6 @@ import type {
   AgentTool,
   AgentToolOutcome,
   AgentToolResult,
-  BrowserConnectionRequest,
   BrowserStep,
   Documentation,
   ModelFailure,
@@ -1021,12 +1020,6 @@ export function createAgentRuntime(dependencies: {
           ...(context.requestPayment
             ? {
                 requestPayment: (input: unknown) => context.requestPayment!(input, ownerGate()),
-              }
-            : {}),
-          ...(context.browserConnection
-            ? {
-                browserConnection: (request: BrowserConnectionRequest) =>
-                  context.browserConnection!(request, ownerGate()),
               }
             : {}),
           integration: (
