@@ -367,6 +367,7 @@ export function createTasks(options: {
     sourceMessageId: string,
     parentTurnId: string,
     retry?: boolean,
+    sourcePrompt?: string,
   ) {
     const task = (
       await client.query(
@@ -393,6 +394,7 @@ export function createTasks(options: {
       )
     ).rows[0];
     if (!message) throw failure('A task update needs an owner message.');
+    const text = sourcePrompt ?? message.text;
     const closed = task.state !== 'open';
     if (closed) {
       const bound =
@@ -401,8 +403,8 @@ export function createTasks(options: {
         task.session_id === task.id &&
         task.activity_key === null &&
         task.source_message_id &&
-        message.text.trim() &&
-        !bareConfirmationAnswer(message.text) &&
+        text.trim() &&
+        !bareConfirmationAnswer(text) &&
         (
           await client.query(
             `WITH answered AS (
@@ -427,7 +429,7 @@ export function createTasks(options: {
       if (!bound)
         throw failure('That task is closed. To continue it, reply to one of its messages.');
     }
-    const turnId = await enqueueTurn(message.text, {
+    const turnId = await enqueueTurn(text, {
       source: 'task',
       sourceId,
       sessionId: task.session_id,
@@ -486,6 +488,7 @@ export function createTasks(options: {
     capture?: CaptureAnalytics,
     priorMessageId?: string,
     priorHandoff = false,
+    sourcePrompt?: string,
   ) {
     const request = input.parse(raw);
     if (request.action === 'list') return { tasks: await read(client) };
@@ -497,7 +500,8 @@ export function createTasks(options: {
         throw failure('Only the main chat can send owner updates to tasks.');
       const ids = new Set(request.ids);
       if (request.retry && ids.size !== 1) throw failure('A retry must name one task.');
-      for (const id of ids) await deliver(client, id, sourceMessageId, turn.turnId, request.retry);
+      for (const id of ids)
+        await deliver(client, id, sourceMessageId, turn.turnId, request.retry, sourcePrompt);
       return { tasks: await read(client) };
     }
     if (request.action === 'stop') {
@@ -618,7 +622,7 @@ export function createTasks(options: {
         ).rows[0];
         if (!source && !current.proactive) throw failure('Owner request not found.');
         const child = await enqueueTurn(
-          current.proactive ? (request.brief ?? request.doneWhen) : source!.text,
+          current.proactive ? (request.brief ?? request.doneWhen) : (sourcePrompt ?? source!.text),
           {
             source: current.proactive ? 'event' : 'task',
             proactive: false,
@@ -1018,13 +1022,24 @@ export function createTasks(options: {
     sourceMessageId: string | null,
     priorMessageId?: string,
     priorHandoff?: boolean,
+    sourcePrompt?: string,
   ) {
     const capture = snapshotAnalytics(options.analytics);
     const result = await transaction(async (client) => {
       await lockThread(client);
       return withTurnLock(
         turn.turnId,
-        () => act(client, turn, raw, sourceMessageId, capture, priorMessageId, priorHandoff),
+        () =>
+          act(
+            client,
+            turn,
+            raw,
+            sourceMessageId,
+            capture,
+            priorMessageId,
+            priorHandoff,
+            sourcePrompt,
+          ),
         client,
       );
     }, pool);

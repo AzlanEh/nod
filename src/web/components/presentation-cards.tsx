@@ -479,7 +479,7 @@ function List({ visual }: { visual: Visual<'items'> }) {
                     <Journey key={index} journey={journey} />
                   ))}
                   {item.facts && <Facts items={item.facts} />}
-                  {link && (
+                  {link && !(pick?.chosen.length === 1 && pick.chosen[0] === index) && (
                     <a
                       className="button button-outline button-sm card-open"
                       href={link}

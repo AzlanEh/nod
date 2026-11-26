@@ -2584,7 +2584,7 @@ async function initializeApplication(
       taskContext: tasks.context,
       settleTask: tasks.settle,
       taskLedger: tasks.read,
-      task: async (turn, raw, sourceMessageId, priorMessageId, priorHandoff) => {
+      task: async (turn, raw, sourceMessageId, priorMessageId, priorHandoff, sourcePrompt) => {
         const request = raw as { action?: unknown; model?: unknown } | undefined;
         if (request?.action === 'start' && request.model) {
           const current = (
@@ -2615,9 +2615,17 @@ async function initializeApplication(
             sourceMessageId,
             priorMessageId,
             priorHandoff,
+            sourcePrompt,
           );
         }
-        return tasks.execute(turn, raw, sourceMessageId, priorMessageId, priorHandoff);
+        return tasks.execute(
+          turn,
+          raw,
+          sourceMessageId,
+          priorMessageId,
+          priorHandoff,
+          sourcePrompt,
+        );
       },
       startTurn: async (turn) => {
         const origin = await turnOrigin(turn.turnId);

@@ -870,6 +870,15 @@ function pageText(page: BrowserObservation) {
 function pageKey(url: string) {
   try {
     const page = new URL(url);
+    return `${page.origin}${page.pathname}`;
+  } catch {
+    return url;
+  }
+}
+
+function pageLocation(url: string) {
+  try {
+    const page = new URL(url);
     return `${page.origin}${page.pathname}${page.search}${page.hash}`;
   } catch {
     return url;
@@ -1059,6 +1068,7 @@ export function nodTools(
     return 'Waiting for the user to sign in.';
   };
   let typedPage = '';
+  let lastLocation = '';
   let typed: string[] = [];
   let pressing = false;
   const observed = (
@@ -1067,6 +1077,7 @@ export function nodTools(
     choice?: string,
   ) => {
     turn.visited(browserId, page.url);
+    lastLocation = pageLocation(page.url);
     const key = pageKey(page.url);
     const same = typedPage === key || !typedPage;
     if (key !== typedPage) {
@@ -1164,7 +1175,7 @@ export function nodTools(
       throw new Error('Put snapshot or screenshot only as the last step.');
     const notes: string[] = [];
     let shown = '';
-    let at = typedPage;
+    let at = lastLocation;
     let moved = false;
     const ran = (count: number) =>
       `Ran ${count} of ${list.length} steps${
@@ -1180,7 +1191,16 @@ export function nodTools(
     for (const [index, item] of list.entries()) {
       const label = `Step ${index + 1} (${item.action})`;
       if (item.action === 'screenshot') {
-        const bytes = await screenshot();
+        let bytes: Awaited<ReturnType<typeof screenshot>>;
+        try {
+          bytes = await screenshot();
+        } catch (error) {
+          if (signal.aborted) throw error;
+          const message = error instanceof Error ? error.message : String(error);
+          throw new Error(`${ran(index)} ${label} failed; later steps did not run. ${message}`, {
+            cause: error,
+          });
+        }
         if (!bytes) return report(index, `${label} found no open page.`);
         shown = '';
         return {
@@ -1224,7 +1244,7 @@ export function nodTools(
         notes.push(`${label}:\n${text}`);
         shown = '';
       } else shown = text;
-      const key = pageKey(done.page.url);
+      const key = pageLocation(done.page.url);
       if (navigations.has(step.action) || (at ? key !== at : commits(step))) moved = true;
       at = key;
       if (done.page.unmet && index < list.length - 1)

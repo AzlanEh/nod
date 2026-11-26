@@ -322,6 +322,7 @@ export interface ThreadDependencies {
     sourceMessageId: string | null,
     priorMessageId?: string,
     priorHandoff?: boolean,
+    sourcePrompt?: string,
   ) => Promise<unknown>;
   taskContext?: (turn: TurnRef) => Promise<RuntimeContext['taskContext']>;
   settleTask?: (turn: TurnRef, result: string) => Promise<void>;
@@ -2958,7 +2959,9 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
                     ),
                 )
               : undefined;
-          return dependencies.task!(ref, input, bound, prior?.id, prior?.handoff);
+          const sourcePrompt =
+            bound && burst.length > 1 && bound === burst.at(-1) ? initialPrompt : undefined;
+          return dependencies.task!(ref, input, bound, prior?.id, prior?.handoff, sourcePrompt);
         }),
       takeMessages:
         turn.background && !taskContext

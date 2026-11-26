@@ -62,6 +62,7 @@ export const requestPublicPreview: PreviewRequest = ({
         const head =
           metadata &&
           /^(?:text\/html|application\/xhtml\+xml)(?:;|$)/i.test(headers['content-type'] ?? '');
+        const limit = head ? Math.min(maxBytes, 512 * 1024) : maxBytes;
         if ([301, 302, 303, 307, 308].includes(status)) {
           response.destroy();
           resolve({ status, headers, body: new Uint8Array() });
@@ -78,17 +79,14 @@ export const requestPublicPreview: PreviewRequest = ({
         const chunks: Buffer[] = [];
         let length = 0;
         response.on('data', (chunk: Buffer) => {
-          const remaining = maxBytes - length;
+          const remaining = limit - length;
           length += chunk.length;
-          if (length > maxBytes && !head) {
+          if (length > limit && !head) {
             response.destroy(new Error('Preview response is too large.'));
             return;
           }
           chunks.push(chunk.subarray(0, remaining));
-          if (
-            head &&
-            (length >= maxBytes || Buffer.concat(chunks).includes(Buffer.from('</head>')))
-          ) {
+          if (head && (length >= limit || Buffer.concat(chunks).includes(Buffer.from('</head>')))) {
             response.destroy();
             resolve({ status, headers, body: Buffer.concat(chunks) });
           }

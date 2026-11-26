@@ -1014,6 +1014,7 @@ export function Chat({
       cardOptionTexts.get(message.replyTo.id)?.has(message.text)
     )
       cardChoices.set(message.replyTo.id, message.text);
+  const lastOwnerIndex = visibleMessages.findLastIndex((message) => message.role === 'user');
   const fileKey = visibleMessages
     .map(
       (message) =>
@@ -2464,15 +2465,29 @@ export function Chat({
                       pickQuestion={cardQuestions.get(message.id)}
                       choicesOnCard={questionsOnCard.has(message.id)}
                       chosenText={cardChoices.get(message.id)}
-                      onChoose={async (value) => {
-                        const result = await send(value, [], {
-                          id: message.id,
-                          role: 'assistant',
-                          text: message.text,
-                        });
-                        if (!result.sent && result.error) throw new Error(result.error);
-                        return result.sent;
-                      }}
+                      onChoose={
+                        message.presentation?.type !== 'draft' ||
+                        index > lastOwnerIndex ||
+                        cardChoices.has(message.id)
+                          ? async (value) => {
+                              const replying = (id?: string) => id === message.id;
+                              const result = await send(
+                                value,
+                                [],
+                                { id: message.id, role: 'assistant', text: message.text },
+                                'answer_choice',
+                              );
+                              if (!result.sent && result.error) throw new Error(result.error);
+                              if (
+                                result.sent &&
+                                replying(replyTo?.id) &&
+                                !composer.current?.hasDraft()
+                              )
+                                setReplyTo((current) => (replying(current?.id) ? null : current));
+                              return result.sent;
+                            }
+                          : undefined
+                      }
                       onAnswer={async (value, answer) => {
                         const target = cardQuestions.get(message.id) ?? message;
                         const replying = (id?: string) => id === message.id || id === target.id;

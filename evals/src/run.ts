@@ -112,7 +112,8 @@ export async function mergeRuns(options: {
   };
   mismatch('model', (manifest) => manifest.model);
   mismatch('backgroundModel', (manifest) => manifest.backgroundModel ?? '');
-  mismatch('effort', (manifest) => manifest.effort ?? '');
+  const efforts = [...new Set(runs.map((run) => run.manifest.effort).filter(Boolean))];
+  if (efforts.length > 1) throw new Error('Cannot merge runs with different effort.');
   mismatch('judge', (manifest) => manifest.judge);
   mismatch('commit', (manifest) => manifest.commit);
   mismatch('repeat', (manifest) => manifest.repeat);
@@ -141,6 +142,7 @@ export async function mergeRuns(options: {
   const startedAt = runs.map((run) => run.manifest.startedAt).sort()[0];
   const manifest: RunManifest = {
     ...first,
+    ...(efforts[0] ? { effort: efforts[0] } : {}),
     shard: undefined,
     label,
     startedAt,
@@ -391,7 +393,7 @@ export async function runSuite(options: RunOptions) {
     const changed: string[] = (Object.keys(wanted) as Array<keyof typeof wanted>).filter(
       (key) => saved[key] !== wanted[key],
     );
-    if (effort && saved.effort && effort !== saved.effort) changed.push('effort');
+    if (effort && effort !== saved.effort) changed.push('effort');
     effort ??= saved.effort;
     const shard = (value?: Shard) => (value ? `${value.index}/${value.total}` : '');
     if (shard(saved.shard) !== shard(options.shard)) changed.push('shard');

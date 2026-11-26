@@ -280,6 +280,7 @@ export function createAgentRuntime(dependencies: {
     const progress = toolProgress();
     let completed = false;
     let lastReply = '';
+    let lastReplyTo: string | null | undefined;
     let lastPresentation = '';
     let fallbackNoted: string | undefined;
     let checkInSpent = context.checkIn?.spentUsd ?? 0;
@@ -362,7 +363,7 @@ export function createAgentRuntime(dependencies: {
       if (!earlier) return false;
       const lower = (set: Set<string>) => new Set([...set].map((word) => word.toLowerCase()));
       const [a, b] = [lower(words(text)), lower(words(earlier))];
-      if (!a.size) return false;
+      if (a.size < 6 || !b.size) return false;
       for (const word of a) if (!b.has(word)) return false;
       return true;
     };
@@ -377,14 +378,16 @@ export function createAgentRuntime(dependencies: {
       const trimmed = stripToolMarkup(text);
       const visual = presentation ? JSON.stringify(presentation) : '';
       const outcome: ReplyDelivery['presentation'] = presentation ? 'original' : 'none';
+      const sameTarget = !replyToMessageId || !lastReplyTo || replyToMessageId === lastReplyTo;
       if (
         (!trimmed && !visual) ||
-        (restates(trimmed, lastReply) && (!visual || visual === lastPresentation))
+        (sameTarget && restates(trimmed, lastReply) && (!visual || visual === lastPresentation))
       )
         return { delivered: false, presentation: outcome };
       if (handoff) await context.reply(trimmed, id, replyToMessageId, presentation, true);
       else await context.reply(trimmed, id, replyToMessageId, presentation);
       lastPresentation = visual;
+      lastReplyTo = replyToMessageId;
       if (id) persistedStreams.add(id);
       lastReply = trimmed;
       return { delivered: true, presentation: outcome };
@@ -1139,11 +1142,11 @@ export function createAgentRuntime(dependencies: {
         };
         const collectedAnswer = () =>
           answer.trim() ||
-          partialAnswer.trim() ||
-          draftText.trim() ||
           (childFindings.length
             ? `Partial findings before stopping:\n${childFindings.join('\n\n')}`
-            : '');
+            : '') ||
+          partialAnswer.trim() ||
+          draftText.trim();
         const childTool = sandboxTool(source, childPath);
         const childTimeoutMs = 45_000;
         let childTimedOut = false;
