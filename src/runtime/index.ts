@@ -1590,7 +1590,12 @@ export function createAgentRuntime(dependencies: {
       if (deferredPause && !stopped) {
         const pending = deferredPause;
         deferredPause = undefined;
-        await commitPause(pending.reason, pending.message, pending.choices);
+        await commitPause(
+          pending.reason,
+          pending.message,
+          pending.choices,
+          pending.replyToMessageId,
+        );
       }
       signal.throwIfAborted();
       if (progress.error)

@@ -468,6 +468,7 @@ export function MessageBubble({
   const hasBubbleContent = hasBubbleText || cardInRow;
   const [error, setError] = useState('');
   const [picked, setPicked] = useState<number[]>([]);
+  const [written, setWritten] = useState('');
   const [sending, setSending] = useState(false);
   const [gone, setGone] = useState(false);
   const pickOptions = pickQuestion?.answerChoices?.options;
@@ -502,8 +503,9 @@ export function MessageBubble({
   const cardPick: CardPick | null = pickChoices.length
     ? {
         chosen: answered.length ? answered : picked,
+        written,
         multiple,
-        sent: answered.length > 0 || openAnswered || Boolean(pickQuestion?.choiceAnswer) || sending,
+        sent: answered.length > 0 || openAnswered || Boolean(pickQuestion?.choiceAnswer),
         closed:
           gone ||
           (!openChoices.length &&
@@ -532,13 +534,21 @@ export function MessageBubble({
                 ? current.filter((value) => value !== index)
                 : [...current, index].sort((a, b) => a - b),
           );
+          if (!multiple) setWritten('');
           setError('');
         },
-        send(written) {
+        write(next) {
+          if (sending || openAnswered) return;
+          setWritten(next);
+          if (!multiple && next.trim()) setPicked([]);
+          setError('');
+        },
+        send(fallback) {
           if (sending || openAnswered || gone) return;
-          const chosen = multiple || !written ? pickedChoices : [];
-          if (!written && !chosen.length) return;
-          const text = [choiceAnswerText(chosen), written].filter(Boolean).join('\n');
+          const note = (written.trim() || fallback?.trim() || '').trim();
+          const chosen = multiple || !note ? pickedChoices : [];
+          if (!note && !chosen.length) return;
+          const text = [choiceAnswerText(chosen), note].filter(Boolean).join('\n');
           const choiceIds = chosen.map((choice) => choice.id);
           const outcome = openChoices.length
             ? onChoose?.(text)
@@ -546,7 +556,7 @@ export function MessageBubble({
                 text,
                 !choiceIds.length
                   ? { custom: true }
-                  : written
+                  : note
                     ? { choiceIds, custom: true }
                     : { choiceIds },
               );
@@ -555,12 +565,13 @@ export function MessageBubble({
           setError('');
           void outcome.then(
             (result) => {
-              if (result === true && !chosen.length) setPicked([]);
-              if (result === 'unavailable') {
-                setSending(false);
+              setSending(false);
+              if (result === true) {
+                setWritten('');
+                if (!chosen.length) setPicked([]);
+              } else if (result === 'unavailable') {
                 setGone(true);
               } else if (result === false) {
-                setSending(false);
                 setError('Your choice could not be sent. Try again.');
               }
             },

@@ -83,7 +83,7 @@ import type { ExecutionEvent } from '../shared/execution.ts';
 import { modelProviderNames, type ModelSelection, type WorkKind } from '../shared/models.ts';
 import { lockKey } from './locks.ts';
 import { redactSecretText } from './redaction.ts';
-import { loadConversationLanguage } from './communication.ts';
+import { backgroundVisibilitySql, loadConversationLanguage } from './communication.ts';
 import { resemblesTaskAcknowledgement } from '../shared/task-ack.ts';
 import type { QuickReplyInput } from './activity.ts';
 
@@ -2183,9 +2183,7 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
        AND m.approval_answer IS NULL AND NOT (m.role='user' AND ${withdrawnSql('m')})
        AND NOT (m.role='user' AND u.status='queued')
        AND ($6::uuid<>$2::uuid OR m.created_at>COALESCE(th.chat_restarted_at,'-infinity'))
-       AND (NOT $5::boolean OR (m.created_at<=boundary.at AND
-         (u.id IS NULL OR u.session_id=$6 OR m.id=boundary.message_id OR u.id=boundary.parent_turn_id
-          OR (u.status IN ('succeeded','failed','cancelled') AND u.finished_at<=boundary.at))))
+       AND (NOT $5::boolean OR ${backgroundVisibilitySql('$6')})
        ORDER BY m.created_at DESC,m.id DESC LIMIT 30) m ORDER BY created_at,id`,
       [ownerId, threadId, sourceMessageId, turn.id, Boolean(turn.background), turn.session_id],
     ),

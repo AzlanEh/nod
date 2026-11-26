@@ -380,6 +380,8 @@ jobs:
               printf '### INCONCLUSIVE against `%s`\n\n- %s\n' "$BASELINE_NAME" "$1" > ".local/capability-evals/$CANDIDATE-gate.md"
               REASON="$1" node -e 'process.stdout.write(JSON.stringify({ verdict: "INCONCLUSIVE", blocking: [], unclear: [process.env.REASON] }, null, 2))' > ".local/capability-evals/$CANDIDATE-gate.json"
               echo "verdict=INCONCLUSIVE" >> "$GITHUB_OUTPUT"
+            else
+              printf '### INCONCLUSIVE (%s)\n\n- %s\n' "$CANDIDATE" "$1" > ".local/capability-evals/$CANDIDATE-gate.md"
             fi
             echo "::error::$1"
             exit 1

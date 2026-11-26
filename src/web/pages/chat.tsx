@@ -1014,7 +1014,6 @@ export function Chat({
       cardOptionTexts.get(message.replyTo.id)?.has(message.text)
     )
       cardChoices.set(message.replyTo.id, message.text);
-  const lastOwnerIndex = visibleMessages.findLastIndex((message) => message.role === 'user');
   const fileKey = visibleMessages
     .map(
       (message) =>
@@ -2465,19 +2464,15 @@ export function Chat({
                       pickQuestion={cardQuestions.get(message.id)}
                       choicesOnCard={questionsOnCard.has(message.id)}
                       chosenText={cardChoices.get(message.id)}
-                      onChoose={
-                        index > lastOwnerIndex || cardChoices.has(message.id)
-                          ? async (value) => {
-                              const result = await send(value, [], {
-                                id: message.id,
-                                role: 'assistant',
-                                text: message.text,
-                              });
-                              if (!result.sent && result.error) throw new Error(result.error);
-                              return result.sent;
-                            }
-                          : undefined
-                      }
+                      onChoose={async (value) => {
+                        const result = await send(value, [], {
+                          id: message.id,
+                          role: 'assistant',
+                          text: message.text,
+                        });
+                        if (!result.sent && result.error) throw new Error(result.error);
+                        return result.sent;
+                      }}
                       onAnswer={async (value, answer) => {
                         const target = cardQuestions.get(message.id) ?? message;
                         const replying = (id?: string) => id === message.id || id === target.id;

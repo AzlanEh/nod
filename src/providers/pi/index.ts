@@ -829,12 +829,17 @@ export function createPiAgent(options: {
       const guided = new Set<string>();
       const deferred =
         !input.restricted || budget.compact || input.tools.some((tool) => tool.deferred);
+      const retry = {
+        enabled: true,
+        baseDelayMs: 4000,
+        ...(backups.length ? { maxRetries: 1 } : {}),
+      };
       const settings = SettingsManager.inMemory({
         compaction: budget.compaction,
         transport: 'sse',
         steeringMode: 'all',
         cacheWarming: input.keepWarm ? 'idle' : 'streaming',
-        retry: { baseDelayMs: 4000, ...(backups.length ? { maxRetries: 1 } : {}) },
+        retry,
       });
       const extensionLoader = new DefaultResourceLoader({
         cwd: input.workspace.path,
@@ -1491,7 +1496,7 @@ export function createPiAgent(options: {
               });
             else await session.prompt(text, { images, expandPromptTemplates: false });
           } finally {
-            settings.applyOverrides({ compaction: budget.compaction });
+            settings.applyOverrides({ compaction: budget.compaction, retry });
             if (dropFailedInput(manager)) session.refreshContext();
           }
         },

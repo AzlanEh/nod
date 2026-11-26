@@ -11,13 +11,15 @@ import { AlertCircle, Check, ChevronDown, ExternalLink, LockKeyhole, Send } from
 
 export interface CardPick {
   chosen: number[];
+  written: string;
   multiple?: boolean;
   disabled: boolean;
   sent: boolean;
   closed?: boolean;
   label?: string;
   choose(index: number): void;
-  send(written?: string): void;
+  write(text: string): void;
+  send(fallback?: string): void;
 }
 
 export const CardPickContext = createContext<CardPick | null>(null);
@@ -42,7 +44,6 @@ export function CardPickSend({
   children?: ReactNode;
 }) {
   const pick = useContext(CardPickContext);
-  const [text, setText] = useState('');
   const link = pick?.chosen.length === 1 ? links?.[pick.chosen[0]!] : undefined;
   const extra =
     children ??
@@ -70,10 +71,10 @@ export function CardPickSend({
     );
   const open = pick && !pick.sent;
   if (!open && !extra) return null;
-  const written = text.trim();
+  const written = pick?.written.trim() ?? '';
   const idle = !open || pick.disabled || (!written && !action && !pick.chosen.length);
   const send = () => {
-    if (!idle) pick.send(written || (pick.chosen.length ? undefined : action?.label));
+    if (!idle) pick.send(written || pick.chosen.length ? undefined : action?.label);
   };
   return (
     <div className="card-band card-pick-send">
@@ -81,12 +82,12 @@ export function CardPickSend({
         <>
           <input
             className="card-pick-write"
-            value={text}
+            value={pick.written}
             maxLength={4000}
             placeholder={placeholder}
             aria-label={placeholder}
             readOnly={pick.disabled}
-            onChange={(event) => setText(event.target.value)}
+            onChange={(event) => pick.write(event.target.value)}
             onKeyDown={(event) => {
               if (event.key !== 'Enter' || event.nativeEvent.isComposing) return;
               event.preventDefault();
@@ -478,7 +479,7 @@ function List({ visual }: { visual: Visual<'items'> }) {
                     <Journey key={index} journey={journey} />
                   ))}
                   {item.facts && <Facts items={item.facts} />}
-                  {link && !pick && (
+                  {link && (
                     <a
                       className="button button-outline button-sm card-open"
                       href={link}

@@ -221,15 +221,11 @@ function languageSample(row?: LanguageRow | { text: string; created_at: Date | s
     : undefined;
 }
 
-function backgroundBoundary(background?: { turnId: string; sessionId: string }) {
-  return background
-    ? `AND m.created_at <= (SELECT created_at FROM turns WHERE owner_id=$1 AND thread_id=$2 AND id=$3)
-       AND (u.id IS NULL OR u.session_id=$4
-         OR m.id=(SELECT message_id FROM turns WHERE owner_id=$1 AND thread_id=$2 AND id=$3)
-         OR u.id=(SELECT parent_turn_id FROM turns WHERE owner_id=$1 AND thread_id=$2 AND id=$3)
-         OR (u.status IN ('succeeded','failed','cancelled')
-             AND u.finished_at <= (SELECT created_at FROM turns WHERE owner_id=$1 AND thread_id=$2 AND id=$3)))`
-    : '';
+export function backgroundVisibilitySql(sessionParam: string, boundary = 'boundary') {
+  return `(m.created_at <= ${boundary}.at AND (u.id IS NULL OR u.session_id=${sessionParam}
+    OR m.id=${boundary}.message_id
+    OR u.id=${boundary}.parent_turn_id
+    OR (u.status IN ('succeeded','failed','cancelled') AND u.finished_at <= ${boundary}.at)))`;
 }
 
 export async function loadConversationLanguage(
@@ -243,13 +239,18 @@ export async function loadConversationLanguage(
     ? undefined
     : (await pool.query("SELECT to_regclass('chat_verification_submissions') AS name")).rows[0]
         ?.name;
-  const boundaryFilter = backgroundBoundary(background);
+  const boundaryCte = background
+    ? 'WITH boundary AS (SELECT created_at AS at,parent_turn_id,message_id FROM turns WHERE owner_id=$1 AND thread_id=$2 AND id=$3) '
+    : '';
+  const boundaryJoin = background ? 'CROSS JOIN boundary' : '';
+  const boundaryFilter = background ? `AND ${backgroundVisibilitySql('$4')}` : '';
   const latest = (
     await pool.query<{ owner: LanguageRow; nod: LanguageRow }>(
-      `SELECT ${
+      `${boundaryCte}SELECT ${
         owner
           ? 'NULL::json'
           : `(SELECT json_build_object('text',m.text,'created_at',m.created_at) FROM messages m
+         ${boundaryJoin}
          LEFT JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id
          WHERE m.owner_id=$1 AND m.thread_id=$2 AND m.role='user' AND m.text<>'' AND m.hidden_at IS NULL
            AND m.approval_answer IS NULL AND NOT ${withdrawnSql('m')}
@@ -258,6 +259,7 @@ export async function loadConversationLanguage(
          ORDER BY m.created_at DESC,m.id DESC LIMIT 1)`
       } AS owner,
         (SELECT json_build_object('text',m.text,'created_at',m.created_at) FROM messages m
+         ${boundaryJoin}
          LEFT JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id
          WHERE m.owner_id=$1 AND m.thread_id=$2 AND m.role='assistant' AND m.text<>'' AND m.hidden_at IS NULL
            ${boundaryFilter}
@@ -311,14 +313,15 @@ export function createCommunication(options: {
     const background = turnId && session ? { turnId, sessionId: session } : undefined;
     const users = (
       await options.pool.query<{ text: string; created_at: Date }>(
-        `SELECT m.text,m.created_at FROM messages m
+        `${background ? 'WITH boundary AS (SELECT created_at AS at,parent_turn_id,message_id FROM turns WHERE owner_id=$1 AND thread_id=$2 AND id=$3) ' : ''}SELECT m.text,m.created_at FROM messages m
+         ${background ? 'CROSS JOIN boundary' : ''}
          LEFT JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id
          WHERE m.owner_id=$1 AND m.thread_id=$2 AND m.role='user' AND m.text<>'' AND m.approval_answer IS NULL AND NOT ${withdrawnSql('m')}
            ${receipts ? 'AND NOT EXISTS (SELECT 1 FROM chat_verification_submissions v WHERE v.message_id=m.id)' : ''}
            AND NOT EXISTS (
              SELECT 1 FROM messages offer, jsonb_array_elements(offer.suggestions->'tasks') task
              WHERE offer.owner_id=$1 AND offer.thread_id=$2 AND task->>'title'=m.text)
-           ${backgroundBoundary(background)}
+           ${background ? `AND ${backgroundVisibilitySql('$4')}` : ''}
          ORDER BY m.created_at DESC,m.id DESC LIMIT 30`,
         background
           ? [options.ownerId, threadId, background.turnId, background.sessionId]

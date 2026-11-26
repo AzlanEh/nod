@@ -112,7 +112,7 @@ export async function mergeRuns(options: {
   };
   mismatch('model', (manifest) => manifest.model);
   mismatch('backgroundModel', (manifest) => manifest.backgroundModel ?? '');
-  mismatch('effort', (manifest) => manifest.effort ?? 'high');
+  mismatch('effort', (manifest) => manifest.effort ?? '');
   mismatch('judge', (manifest) => manifest.judge);
   mismatch('commit', (manifest) => manifest.commit);
   mismatch('repeat', (manifest) => manifest.repeat);
@@ -325,6 +325,7 @@ async function checkHarness(
   model: string,
   judge: string,
   backgroundModel?: string,
+  effort?: ModelEffort,
   source?: string,
 ) {
   const item = scenarios.find((entry) => entry.id === 'harness-canary')!;
@@ -339,6 +340,7 @@ async function checkHarness(
       directory,
       model,
       backgroundModel,
+      effort,
       judge,
       source,
       task: { item, attempt },
@@ -389,7 +391,7 @@ export async function runSuite(options: RunOptions) {
     const changed: string[] = (Object.keys(wanted) as Array<keyof typeof wanted>).filter(
       (key) => saved[key] !== wanted[key],
     );
-    if (effort && effort !== (saved.effort ?? 'high')) changed.push('effort');
+    if (effort && saved.effort && effort !== saved.effort) changed.push('effort');
     effort ??= saved.effort;
     const shard = (value?: Shard) => (value ? `${value.index}/${value.total}` : '');
     if (shard(saved.shard) !== shard(options.shard)) changed.push('shard');
@@ -411,7 +413,7 @@ export async function runSuite(options: RunOptions) {
   const refSource = options.ref ? source : undefined;
   try {
     if (options.canary !== false && selected.some((item) => item.tier !== 'canary'))
-      await checkHarness(model, judge, options.backgroundModel, refSource);
+      await checkHarness(model, judge, options.backgroundModel, effort, refSource);
     const digest = async (image: string) =>
       (await runProcess('docker', ['image', 'inspect', image, '--format', '{{.Id}}'])).stdout
         .trim()
