@@ -69,6 +69,12 @@ export const skillName = z
   .max(64);
 export const skillDescription = line(skillDescriptionChars);
 export const skillBody = lines(skillChars);
+const skillVersionSchema = z.object({
+  version: z.number().int().positive(),
+  description: skillDescription,
+  body: skillBody,
+  updated: timestamp,
+});
 const skillSchema = z.object({
   name: skillName,
   description: skillDescription,
@@ -78,6 +84,11 @@ const skillSchema = z.object({
   used: timestamp.optional(),
   edited: timestamp.optional(),
   turn: z.uuid().optional(),
+  overlayFor: skillName.optional(),
+  version: z.number().int().positive().optional(),
+  history: z.array(skillVersionSchema).max(5).optional(),
+  failures: z.number().int().nonnegative().optional(),
+  stale: z.boolean().optional(),
 });
 
 export const factSchema = z
@@ -442,6 +453,10 @@ export function view(
         updated: skill.updated,
         edited: skill.edited ?? null,
         task: task(skill.turn),
+        ...(skill.overlayFor ? { overlayFor: skill.overlayFor } : {}),
+        ...(skill.version ? { version: skill.version } : {}),
+        ...(skill.stale ? { stale: true } : {}),
+        ...(skill.history?.length ? { history: skill.history } : {}),
       })),
   };
 }

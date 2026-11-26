@@ -38,6 +38,12 @@ export interface Message {
   answerChoices?: AnswerChoices;
   answerChoicesPending?: boolean;
   choiceAnswer?: { choiceIds: string[]; text?: string };
+  interaction?: {
+    id: string;
+    status: 'open' | 'selected' | 'fulfilled' | 'superseded' | 'expired' | 'cancelled';
+    selectedOptionIds?: string[];
+    validUntil?: string;
+  };
   approval?: MessageApproval;
   cardAnswer?: true;
   work?: { kind: 'task' | 'schedule'; id: string; title: string; turnId?: string };

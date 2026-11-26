@@ -1,6 +1,7 @@
 import { presentationSchema, presentationText } from '../shared/presentation.ts';
 import {
   answerChoicesSchema,
+  choiceAnswerText,
   questionAnswerSchema,
   writtenAnswer,
   type AnswerChoice,
@@ -26,7 +27,8 @@ import {
   ownerId,
   port,
 } from './config.ts';
-import { events, type ServerEvent } from './events.ts';
+import { events, refresh, type ServerEvent } from './events.ts';
+import { transaction } from './transaction.ts';
 import { artifactView, localArtifacts, type ArtifactService } from './artifacts.ts';
 import {
   activeHandoffSql,
@@ -66,11 +68,14 @@ import { registerWorkAdmission, type WorkAdmission } from './work-admission.ts';
 import { registerAnalyticsRoutes, snapshotAnalytics, type CaptureAnalytics } from './analytics.ts';
 import { messagePreview } from './message-preview.ts';
 import { validateRequestText } from './request-text.ts';
+import { createCardInteractions } from './card-interactions.ts';
 
 const messageFields = `m.id,m.role,m.text,CASE WHEN m.role='user' THEN m.display_text END AS "displayText",m.audio_caption AS "audioCaption",m.turn_id AS "turnId",m.created_at AS "createdAt",m.attachments,m.stream_id AS "streamId",m.reaction,m.assistant_reaction AS "assistantReaction",m.reply_to_message_id AS "replyToMessageId",m.suggestions,m.presentation,m.answer_choices AS "answerChoices",(${pendingAnswerChoicesSql}) AS "answerChoicesPending",
  (m.role='user' AND (m.approval_answer IS NOT NULL OR (m.question_answer IS NOT NULL AND m.text<>'' AND jsonb_array_length(m.attachments)=0))) AS "cardAnswer",
  CASE WHEN m.role='assistant' AND m.answer_choices IS NOT NULL THEN (SELECT json_build_object('answer',a.question_answer,'text',a.text) FROM messages a
    WHERE a.reply_to_message_id=m.id AND a.owner_id=m.owner_id AND a.role='user' AND a.question_answer IS NOT NULL AND a.text<>'' AND jsonb_array_length(a.attachments)=0 ORDER BY a.created_at,a.id LIMIT 1) END AS "choiceAnswer",
+ CASE WHEN m.role='assistant' THEN (SELECT json_build_object('id',ci.id,'status',ci.status,'selectedOptionIds',ci.selected_option_ids,'validUntil',ci.valid_until) FROM card_interactions ci
+   WHERE ci.message_id=m.id AND ci.owner_id=m.owner_id ORDER BY ci.created_at DESC LIMIT 1) END AS "interaction",
  CASE WHEN m.role='assistant' THEN (SELECT json_build_object('id',a.id,'status',a.status,'action',a.action,'title',a.title,'decline',a.decline,'cardQuestion',a.card_question,'args',a.args,'failure',CASE WHEN a.status IN ('expired','uncertain') AND jsonb_typeof(a.result->'error')='string' THEN a.result->>'error' END,'active',u.status IN ('running','waiting'),'executionActive',e.status IN ('queued','running','waiting')) FROM approvals a
    JOIN turns u ON u.id=a.turn_id AND u.owner_id=a.owner_id LEFT JOIN turns e ON e.id=a.execution_turn_id AND e.owner_id=a.owner_id
    WHERE a.confirmation_message_id=m.id AND a.owner_id=m.owner_id LIMIT 1) END AS "approval",
@@ -140,11 +145,22 @@ function choiceAnswerView(options: AnswerChoice[], row: ChoiceAnswerRow | null |
   return { choiceIds, ...(text ? { text } : {}) };
 }
 
-type MessageRow = Omit<Message, 'approval' | 'choiceAnswer' | 'cardAnswer' | 'work'> & {
+type InteractionRow = {
+  id: string;
+  status: 'open' | 'selected' | 'fulfilled' | 'superseded' | 'expired' | 'cancelled';
+  selectedOptionIds?: string[] | null;
+  validUntil?: string | null;
+};
+
+type MessageRow = Omit<
+  Message,
+  'approval' | 'choiceAnswer' | 'cardAnswer' | 'work' | 'interaction'
+> & {
   work?: Message['work'] | null;
   assistantReaction?: MessageReaction | null;
   approval?: ApprovalRow | null;
   choiceAnswer?: ChoiceAnswerRow | null;
+  interaction?: InteractionRow | null;
   cardAnswer?: boolean | null;
 };
 
@@ -158,6 +174,7 @@ function messageView(row: MessageRow): Message {
     answerChoicesPending,
     approval,
     choiceAnswer,
+    interaction,
     cardAnswer,
     work,
     ...message
@@ -178,6 +195,18 @@ function messageView(row: MessageRow): Message {
       ? { answerChoices: choices.data, answerChoicesPending: answerChoicesPending === true }
       : {}),
     ...(answered ? { choiceAnswer: answered } : {}),
+    ...(interaction
+      ? {
+          interaction: {
+            id: interaction.id,
+            status: interaction.status,
+            ...(Array.isArray(interaction.selectedOptionIds)
+              ? { selectedOptionIds: interaction.selectedOptionIds }
+              : {}),
+            ...(interaction.validUntil ? { validUntil: interaction.validUntil } : {}),
+          },
+        }
+      : {}),
     ...(approval
       ? {
           approval: {
@@ -566,6 +595,56 @@ export async function createApp(dependencies: AppDependencies = {}) {
         void dependencies.computer?.discard(id).catch(() => {});
       return reset;
     }, threadId);
+  });
+  const cardInteractions = createCardInteractions(pool, ownerId);
+  app.post('/api/interactions/:id/select', async (request, reply) => {
+    const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    const { optionIds } = z
+      .object({ optionIds: z.array(z.string().min(1)).min(1).max(6) })
+      .strict()
+      .parse(request.body);
+    if (!publicConfiguration().llmReady)
+      return reply.code(503).send({
+        error: 'Choose a model in Models before sending a message.',
+        code: 'model_required',
+      });
+    const result = await transaction(async (client) => {
+      const outcome = await cardInteractions.selectInteraction(client, id, optionIds);
+      if (!outcome.ok) return outcome;
+      if (outcome.alreadySelected) return outcome;
+      const text = choiceAnswerText(outcome.selected);
+      const submitted = await (dependencies.submitMessage ?? submitUserMessage)(text, [], {
+        replyToMessageId: outcome.interaction.messageId,
+        questionAnswer: { choiceIds: outcome.selected.map((opt) => opt.id) },
+        channel: 'web',
+        client,
+      });
+      return { ...outcome, submitted };
+    }, pool);
+    if (!result.ok) {
+      const status =
+        result.code === 'not_found' ? 404 : result.code === 'invalid_option' ? 400 : 409;
+      return reply.code(status).send({
+        error:
+          result.code === 'expired'
+            ? 'This card option has expired.'
+            : result.code === 'closed'
+              ? 'This card is no longer open for selection.'
+              : result.code === 'invalid_option'
+                ? 'Choose an available option.'
+                : 'Interaction not found.',
+        code: `interaction_${result.code}`,
+        status: result.status,
+      });
+    }
+    refresh();
+    return {
+      interactionId: result.interaction.id,
+      status: result.interaction.status,
+      selectedOptionIds: result.interaction.selectedOptionIds,
+      alreadySelected: result.alreadySelected,
+      ...('submitted' in result ? { submitted: result.submitted } : {}),
+    };
   });
   app.post('/api/conversation/restart-context', async (request) => {
     const { threadId, turnId } = z

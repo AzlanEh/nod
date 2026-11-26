@@ -939,12 +939,15 @@ export function createAgentRuntime(dependencies: {
                     { additionalProperties: false },
                   )
                 : tool.parameters;
+            const coordinator = !context.taskContext && !context.background && !context.proactivity;
+            const deferredByRole = coordinator && (name === 'computer' || name === 'files');
+            const eager = Boolean(tool.eager && !deferredByRole);
             const deferred = (tool as Partial<Pick<AgentTool, 'deferred'>>).deferred;
             return {
               name,
               description,
               parameters,
-              ...(tool.eager ? { eager: true } : {}),
+              ...(eager ? { eager: true } : {}),
               ...(tool.companions ? { companions: tool.companions } : {}),
               ...(deferred ? { deferred } : {}),
               parallel: Boolean(deferred) || parallelTools.has(name),

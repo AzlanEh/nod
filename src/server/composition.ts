@@ -1,7 +1,7 @@
 import { transaction } from './transaction.ts';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, stat } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
-import { basename, join } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { isEnterKey } from '../shared/browser-keys.ts';
@@ -204,6 +204,7 @@ import { createPersonalService } from './personal.ts';
 import { createOnboardingSuggestions } from './onboarding-suggestions.ts';
 import { createOnboardingProfile } from './onboarding-profile.ts';
 import { createMemoryLearning, initializeMemoryLearning } from './memory-learning.ts';
+import { createProcedureCurator } from './procedure-curator.ts';
 import { createScheduleIdeas } from './schedule-ideas.ts';
 import { createMemoryService, importMemoryFile } from './memory.ts';
 import { createMemoryRecall } from './memory-recall.ts';
@@ -225,6 +226,7 @@ import {
   startThreadWorkers,
   stopSignal,
   stopThreadWorkers,
+  sweepExpiredTurns,
   withTurnLock,
   workOrigin,
   type TurnRef,
@@ -1129,13 +1131,24 @@ async function initializeApplication(
     curator,
     analytics: captureAnalytics,
   });
+  const builtInSkillNames = [...skillLibrary.catalog.map((skill) => skill.name), ...coreSkills];
   const learnedSkills = createLearnedSkills({
     memory,
     curator,
-    builtIn: [...skillLibrary.catalog.map((skill) => skill.name), ...coreSkills],
+    builtIn: builtInSkillNames,
     redact: createErrorRedactor(secrets),
     analytics: captureAnalytics,
   });
+  const procedureCurator = createProcedureCurator({
+    pool,
+    ownerId,
+    memory,
+    learnedSkills,
+    curator,
+    builtIn: builtInSkillNames,
+    consumers,
+  });
+  const turnUsedSkills = new Map<string, Set<string>>();
   let retireScheduleConfirmations:
     | ((client: import('pg').PoolClient, id: string, waitForSend: boolean) => Promise<void>)
     | undefined;
@@ -1217,6 +1230,38 @@ async function initializeApplication(
     analytics: captureAnalytics,
     refresh,
     clearBrowser: (id) => adapters.computer.clear(id),
+    evaluateWakeCheck: async (threadId, taskId, check) => {
+      if (check.kind === 'file_exists') {
+        const root = resolve(dataRoot, 'workspaces', threadId);
+        const taskRoot = resolve(root, 'tasks', taskId);
+        const full = resolve(taskRoot, check.target);
+        if (!full.startsWith(`${root}/`) && full !== root) return { changed: false };
+        const exists = await stat(full)
+          .then((info) => info.isFile() || info.isDirectory())
+          .catch(() => false);
+        return exists
+          ? { changed: true, summary: `Workspace path ${check.target} is now present.` }
+          : { changed: false };
+      }
+      const response = await ownerFetch(check.target, publicHttps)(check.target, {
+        method: 'GET',
+        headers: { accept: 'text/plain, text/html, application/json;q=0.9, */*;q=0.5' },
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!response.ok) return { changed: true, summary: `URL returned HTTP ${response.status}.` };
+      const body = (await response.text()).slice(0, 65_536);
+      const fingerprint = createHash('sha256').update(body).digest('hex');
+      if (!check.baseline) return { changed: false, baseline: fingerprint };
+      if (fingerprint === check.baseline) return { changed: false, baseline: fingerprint };
+      return {
+        changed: true,
+        baseline: fingerprint,
+        summary: `Content at ${check.target} changed.`,
+      };
+    },
+    onTaskDone: (taskId) => {
+      if (options.workers !== false) void procedureCurator.enqueue(taskId);
+    },
     ...(adapters.models
       ? { validateModel: (choice: ModelSelection) => adapters.models!.validateChoice(choice) }
       : {}),
@@ -1290,6 +1335,7 @@ async function initializeApplication(
     },
     sweep: async () => {
       await sweepArtifacts();
+      await sweepExpiredTurns().catch((error) => logFailure('turn_lease_sweep', error));
       await tasks.wakeDue().catch((error) => logFailure('task_wake', error));
       await vault.forgetExpiredHolds().catch((error) => logFailure('vault_expiry', error));
     },
@@ -2440,6 +2486,7 @@ async function initializeApplication(
       consumers,
       run: () => analytics.withSystemWork(ownerId, 'memory_learning', learning.run),
     });
+    await procedureCurator.start();
     startThreadConsumers = startThreadWorkers.bind(undefined, {
       present: communication.present,
       taskChecks: tasks.resumeDue,
@@ -2551,6 +2598,24 @@ async function initializeApplication(
                   ...(delegateModel ? { delegateModel } : {}),
                   runtimeHost: desktopMode ? 'desktop' : 'server',
                 })
+                .then(
+                  (result) => {
+                    const used = turnUsedSkills.get(context.turnId);
+                    if (used?.size) {
+                      turnUsedSkills.delete(context.turnId);
+                      for (const name of used) void learnedSkills.recordOutcome(name, true);
+                    }
+                    return result;
+                  },
+                  (error) => {
+                    const used = turnUsedSkills.get(context.turnId);
+                    if (used?.size) {
+                      turnUsedSkills.delete(context.turnId);
+                      for (const name of used) void learnedSkills.recordOutcome(name, false);
+                    }
+                    throw error;
+                  },
+                )
                 .finally(() => proactivity.release(context.turnId)),
             Boolean(context.spendingLimitReached),
             Boolean(context.automatic),
@@ -2898,7 +2963,29 @@ async function initializeApplication(
             details: verdict.confirm ? { reason: verdict.reason } : {},
           });
         }
-        if (action === 'skill_read') return learnedSkills.read(String(args.name));
+        if (action === 'skill_read') {
+          const name = String(args.name);
+          const result = await learnedSkills.read(name);
+          let used = turnUsedSkills.get(turn.turnId);
+          if (!used) {
+            used = new Set();
+            turnUsedSkills.set(turn.turnId, used);
+          }
+          used.add(name);
+          return result;
+        }
+        if (action === 'skill_overlays') {
+          const overlays = await learnedSkills.overlayFor(String(args.name));
+          if (overlays?.length) {
+            let used = turnUsedSkills.get(turn.turnId);
+            if (!used) {
+              used = new Set();
+              turnUsedSkills.set(turn.turnId, used);
+            }
+            for (const overlay of overlays) used.add(overlay.name);
+          }
+          return overlays;
+        }
         if (action === 'skill_save' || action === 'skill_patch') {
           const origin = await turnOrigin(turn.turnId);
           if (!origin || !['user', 'schedule', 'task'].includes(origin.source))
