@@ -155,7 +155,7 @@ function Working({
       <div className="thinking">
         <NodGlyph size={28} mode="thinking" />
         <div className="working-details">
-          <WorkLabel work={routed} />
+          <WorkLabel work={routed} mark={false} />
         </div>
       </div>
     );

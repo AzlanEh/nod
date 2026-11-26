@@ -314,14 +314,15 @@ export interface MessageWork {
   onOpen?(): void;
 }
 
-export function WorkLabel({ work }: { work: MessageWork }) {
+export function WorkLabel({ work, mark = true }: { work: MessageWork; mark?: boolean }) {
   const content = (
     <>
-      {work.status !== 'idle' ? (
-        <TaskMark status={work.status} size={22} />
-      ) : (
-        work.done && <TaskMark status="done" size={22} />
-      )}
+      {mark &&
+        (work.status !== 'idle' ? (
+          <TaskMark status={work.status} size={22} />
+        ) : (
+          work.done && <TaskMark status="done" size={22} />
+        ))}
       <span className="message-work-title">{work.title}</span>
       {work.status === 'working' && (
         <span className="message-work-step">
