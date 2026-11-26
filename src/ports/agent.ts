@@ -283,7 +283,7 @@ export interface RuntimeResult {
   status: 'succeeded' | 'waiting_credentials' | 'waiting_user';
   waitingFor?: 'question' | 'approval' | 'credentials';
   message?: string;
-  replyToMessageId?: string;
+  replyToMessageId?: string | null;
   answerChoices?: AnswerChoices;
   handoffBrowserId?: string;
   result?: string;

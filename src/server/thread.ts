@@ -2508,6 +2508,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
     sourceMessageId = loaded.sourceMessageId;
     if (sourceMessageId) ownerMessageIds.push(sourceMessageId);
     let initialPrompt = String(turn.prompt ?? '');
+    let coalescedBurst = false;
     if (
       burstCoalesceMs > 0 &&
       turn.source === 'user' &&
@@ -2516,6 +2517,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
     ) {
       const extra = await takeQueuedMessages(turnId, turn.session_id, turn.channel);
       if (extra.length) {
+        coalescedBurst = true;
         sourceMessageId = extra.at(-1)!.id;
         ownerMessageIds.push(...extra.map((message) => message.id));
         const lines = [initialPrompt, ...extra.map((message) => message.text)].filter((part) =>
@@ -2724,7 +2726,11 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
       emit,
       reply: async (text, streamId, replyToMessageId, presentation, handoff) => {
         const pending = shared.slice();
-        await post(text, pending, streamId, replyToMessageId, presentation, handoff);
+        const target =
+          replyToMessageId === undefined && coalescedBurst && !taskContext && !handoff
+            ? null
+            : replyToMessageId;
+        await post(text, pending, streamId, target, presentation, handoff);
         shared.splice(0, pending.length);
       },
       delta: (text, streamId, done) => {
@@ -3022,7 +3028,9 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
           result.message,
           shared.splice(0),
           undefined,
-          result.replyToMessageId,
+          result.replyToMessageId === undefined && coalescedBurst && !taskContext
+            ? null
+            : result.replyToMessageId,
           undefined,
           answerChoices,
           dependencies.analytics,
