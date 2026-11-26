@@ -25,10 +25,10 @@ import type {
 import type { SuggestedTask, TaskSuggestions } from '../../shared/onboarding';
 import type { TrustView } from '../../shared/trust';
 import { appPages } from '../../shared/app-links';
-import type { QuestionAnswer } from '../../shared/answer-choices';
+import { choiceAnswerText, type QuestionAnswer } from '../../shared/answer-choices';
 import { integrationMetadata, integrationServices } from '../../shared/integrations';
 import { moreIdeasLine } from '../../shared/sender-apps';
-import { presentationPick, presentationText } from '../../shared/presentation';
+import { presentationChoices, presentationPick, presentationText } from '../../shared/presentation';
 import { classifyVerificationReply, securityCodeIn } from '../../shared/verification-code';
 import { ChatTools } from '../components/chat-tools';
 import { ServiceLogo } from '../components/service-logo';
@@ -988,9 +988,31 @@ export function Chat({
       return;
     }
   });
+  const cardOptionTexts = new Map<string, Set<string>>();
+  for (const message of visibleMessages) {
+    if (
+      message.role !== 'assistant' ||
+      !message.presentation ||
+      presentationPick(message.presentation)
+    )
+      continue;
+    const choices = presentationChoices(message.presentation);
+    if (choices.length)
+      cardOptionTexts.set(
+        message.id,
+        new Set(
+          choices.map((choice, index) => choiceAnswerText([{ ...choice, id: String(index) }])),
+        ),
+      );
+  }
   const cardChoices = new Map<string, string>();
   for (const message of visibleMessages)
-    if (message.role === 'user' && message.replyTo?.role === 'assistant')
+    if (
+      message.role === 'user' &&
+      message.replyTo?.role === 'assistant' &&
+      !cardChoices.has(message.replyTo.id) &&
+      cardOptionTexts.get(message.replyTo.id)?.has(message.text)
+    )
       cardChoices.set(message.replyTo.id, message.text);
   const lastOwnerIndex = visibleMessages.findLastIndex((message) => message.role === 'user');
   const fileKey = visibleMessages

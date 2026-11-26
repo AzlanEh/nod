@@ -488,7 +488,7 @@ export function MessageBubble({
   const openChosen = openChoices.findIndex(
     (choice) => chosenText !== undefined && choiceAnswerText([choice]) === chosenText,
   );
-  const openAnswered = openChoices.length > 0 && chosenText !== undefined;
+  const openAnswered = openChosen >= 0;
   const pickChoices = openChoices.length ? openChoices : (pickOptions ?? []);
   const answered = openChoices.length
     ? openChosen >= 0
