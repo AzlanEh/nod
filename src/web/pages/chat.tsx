@@ -2465,7 +2465,9 @@ export function Chat({
                       onRetry={
                         message.role === 'assistant' &&
                         message.streamId?.startsWith('failure:') &&
-                        !message.text.includes('may not have finished')
+                        !message.text.includes('may not have finished') &&
+                        !message.text.includes('result is unknown') &&
+                        !message.text.includes('uncertain')
                           ? () => {
                               void send(
                                 'Continue',
