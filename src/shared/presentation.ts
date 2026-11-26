@@ -825,15 +825,9 @@ function pickLabels(value: Presentation) {
 export const draftSendLabel = 'Send it';
 
 export function presentationChoices(value: Presentation) {
-  if (value.type === 'compare')
-    return value.winner === undefined && !value.verdict ? pickLabels(value) : [];
+  if (value.type === 'compare') return pickLabels(value);
   if (value.type === 'draft' && value.status === 'draft') return [{ label: draftSendLabel }];
-  if (
-    value.type === 'items' &&
-    value.items.length >= 2 &&
-    value.items.length <= 6 &&
-    !value.items.some((item) => item.status || item.badge)
-  )
+  if (value.type === 'items' && value.items.length >= 2 && value.items.length <= 6)
     return pickLabels(value);
   return [];
 }
