@@ -1185,6 +1185,8 @@ export function createAgentRuntime(dependencies: {
                 ...tool,
                 execute: async (params, options) => {
                   if (capped) return spent();
+                  partialFresh = false;
+                  draftFresh = false;
                   const result = await tool.execute(params, options);
                   recordFinding(tool.name, result);
                   return result;
@@ -1194,6 +1196,8 @@ export function createAgentRuntime(dependencies: {
             timeZone: context.timeZone,
             runTool: async (name, params, run, options) => {
               if (capped) return spent();
+              partialFresh = false;
+              draftFresh = false;
               const result = await childTool(name, params, run, options);
               recordFinding(name, result);
               return result;
@@ -1213,7 +1217,7 @@ export function createAgentRuntime(dependencies: {
               if (event.type === 'message_end') {
                 if (draftText.trim()) {
                   partialAnswer = draftText.trim();
-                  partialFresh = draftFresh;
+                  partialFresh = draftFresh && !event.beforeTool;
                 }
                 draftText = '';
                 draftFresh = false;
