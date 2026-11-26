@@ -5,7 +5,6 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import pg from 'pg';
-import { createAgentSession } from '@earendil-works/pi-coding-agent';
 import type { ModelEffort } from '../../src/shared/models.ts';
 import { parse } from 'dotenv';
 import { readFile } from 'node:fs/promises';
@@ -391,6 +390,15 @@ export async function startStack(options: {
       },
     });
     await models.initialize();
+    if (model.effort) {
+      const current = models.view().selection;
+      if (current && current.effort !== model.effort) {
+        const connection = models.view().connections.find((row) => row.id === current.connectionId);
+        const choice = connection?.models.find((item) => item.id === current.modelId);
+        if (choice?.efforts.includes(model.effort))
+          await models.select({ ...current, effort: model.effort });
+      }
+    }
     if (options.backgroundModel) {
       if (!('setRoute' in models))
         throw new Error('--background-model needs app code that supports model routes.');
@@ -433,16 +441,6 @@ export async function startStack(options: {
             apiKey: model.apiKey,
             resolve: (choice) => models.resolve(false, choice),
             sessionRoot,
-            ...(model.effort
-              ? {
-                  createSession: (input) =>
-                    createAgentSession(
-                      input?.model?.id === model.name
-                        ? { ...input, thinkingLevel: model.effort }
-                        : input,
-                    ),
-                }
-              : {}),
           }),
         ),
         computer,
