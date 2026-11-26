@@ -318,7 +318,7 @@ export function createAgentRuntime(dependencies: {
     let owed: string[] = [];
     let owedRefused = false;
     let spoke = false;
-    let spokeTo: string | null | undefined;
+    let waitingReplyTo: string | undefined;
     let answered = false;
     let lastNote = '';
     let reported = false;
@@ -360,15 +360,11 @@ export function createAgentRuntime(dependencies: {
     const restates = (text: string, earlier: string) => {
       if (text === earlier) return true;
       if (!earlier) return false;
-      const known = words(earlier);
-      const added = [...words(text)].filter((word) => !known.has(word));
-      if (added.some((word) => /^\p{Lu}|\p{N}/u.test(word))) return false;
       const lower = (set: Set<string>) => new Set([...set].map((word) => word.toLowerCase()));
-      const [a, b] = [lower(words(text)), lower(known)];
-      if (Math.min(a.size, b.size) < 12) return false;
-      let shared = 0;
-      for (const word of a) if (b.has(word)) shared++;
-      return shared / Math.max(a.size, b.size) >= 0.85;
+      const [a, b] = [lower(words(text)), lower(words(earlier))];
+      if (!a.size) return false;
+      for (const word of a) if (!b.has(word)) return false;
+      return true;
     };
     const deliverReply = async (
       text: string,
@@ -417,6 +413,7 @@ export function createAgentRuntime(dependencies: {
           reason: Parameters<Turn['pause']>[0];
           message?: string;
           choices?: Parameters<Turn['pause']>[2];
+          replyToMessageId?: string;
         }
       | undefined;
     let pausePromise: Promise<void> | undefined;
@@ -424,6 +421,7 @@ export function createAgentRuntime(dependencies: {
       reason: Parameters<Turn['pause']>[0],
       message?: string,
       choices?: Parameters<Turn['pause']>[2],
+      replyToMessageId?: string,
     ) => {
       if (browsed) {
         const hold = computer.hold(browserId, true);
@@ -433,6 +431,7 @@ export function createAgentRuntime(dependencies: {
       status = reason === 'credentials' ? 'waiting_credentials' : 'waiting_user';
       waitingFor = reason === 'browser' ? 'question' : reason;
       waitingMessage = message;
+      waitingReplyTo = reason === 'question' ? replyToMessageId : undefined;
       answerChoices = reason === 'question' ? choices : undefined;
       if (reason === 'browser') handoffBrowserId = browserId;
       stopped = true;
@@ -445,11 +444,16 @@ export function createAgentRuntime(dependencies: {
         await readFirst();
       }
       if (options?.deferred) {
-        deferredPause = { reason, message, choices };
+        deferredPause = {
+          reason,
+          message,
+          choices,
+          replyToMessageId: options.replyToMessageId,
+        };
         return true;
       }
       deferredPause = undefined;
-      await commitPause(reason, message, choices);
+      await commitPause(reason, message, choices, options?.replyToMessageId);
       return true;
     };
     const confirm = async (result: unknown) => {
@@ -472,7 +476,6 @@ export function createAgentRuntime(dependencies: {
       streamSubmitted = true;
       if (!context.taskContext) {
         spoke = true;
-        spokeTo = undefined;
       }
       pendingReplies = pendingReplies
         .then(async () => {
@@ -1066,16 +1069,14 @@ export function createAgentRuntime(dependencies: {
           partial?: boolean,
         ) => {
           const chat = !context.taskContext && !handoff;
-          const first = chat && !spoke;
           const delivery = await reply(text, id, replyToMessageId, presentation, handoff);
           if (delivery.delivered && chat && !partial) {
             spoke = true;
-            spokeTo = replyToMessageId;
           }
           if (delivery.delivered && !handoff)
             owed = replyToMessageId
               ? owed.filter((owedId) => owedId !== replyToMessageId)
-              : first
+              : partial
                 ? owed
                 : [];
           return delivery;
@@ -1110,6 +1111,9 @@ export function createAgentRuntime(dependencies: {
         assertActive();
         let browsed = false;
         let answer = '';
+        let partialAnswer = '';
+        let draftText = '';
+        const childFindings: string[] = [];
         let failure: string | undefined;
         let incomplete = false;
         let completed = false;
@@ -1119,6 +1123,27 @@ export function createAgentRuntime(dependencies: {
         const maxChildSteps = 6;
         const spent = () =>
           Promise.reject(new Error('No tool steps are left. Answer now with what you found.'));
+        const recordFinding = (name: string, output: unknown) => {
+          const text = isToolResult(output)
+            ? output.content.flatMap((part) => (part.type === 'text' ? [part.text] : [])).join('\n')
+            : typeof output === 'string'
+              ? output
+              : JSON.stringify(output);
+          const compact = text.trim();
+          if (!compact) return;
+          const limit = 1_500;
+          childFindings.push(
+            `${name}: ${compact.length > limit ? `${compact.slice(0, limit)}…` : compact}`,
+          );
+          if (childFindings.length > maxChildSteps) childFindings.shift();
+        };
+        const collectedAnswer = () =>
+          answer.trim() ||
+          partialAnswer.trim() ||
+          draftText.trim() ||
+          (childFindings.length
+            ? `Partial findings before stopping:\n${childFindings.join('\n\n')}`
+            : '');
         const childTool = sandboxTool(source, childPath);
         const childTimeoutMs = 45_000;
         let childTimedOut = false;
@@ -1149,12 +1174,21 @@ export function createAgentRuntime(dependencies: {
               .filter((tool) => !parentTools.has(tool.name))
               .map((tool) => ({
                 ...tool,
-                execute: (params, options) => (capped ? spent() : tool.execute(params, options)),
+                execute: async (params, options) => {
+                  if (capped) return spent();
+                  const result = await tool.execute(params, options);
+                  recordFinding(tool.name, result);
+                  return result;
+                },
               })),
             workspace: { ...workspace, path: childPath },
             timeZone: context.timeZone,
-            runTool: (name, params, run, options) =>
-              capped ? spent() : childTool(name, params, run, options),
+            runTool: async (name, params, run, options) => {
+              if (capped) return spent();
+              const result = await childTool(name, params, run, options);
+              recordFinding(name, result);
+              return result;
+            },
             shouldStop: (results) => {
               if (stopped || overBudget() || childProgress.stopped(results) || capped) return true;
               capped = ++childSteps >= maxChildSteps;
@@ -1162,9 +1196,18 @@ export function createAgentRuntime(dependencies: {
             },
             onEvent: (event) => {
               countUsage(event);
-              if (event.type === 'final') answer = event.text;
+              if (event.type === 'message_start') draftText = '';
+              if (event.type === 'text_delta') draftText += event.text;
+              if (event.type === 'message_end') {
+                if (draftText.trim()) partialAnswer = draftText.trim();
+                draftText = '';
+                if (event.status === 'incomplete') incomplete = true;
+              }
+              if (event.type === 'final') {
+                answer = event.text;
+                draftText = '';
+              }
               if (event.type === 'error') failure = event.message;
-              if (event.type === 'message_end' && event.status === 'incomplete') incomplete = true;
               if (
                 event.type === 'final' ||
                 (event.type === 'message_end' && event.status === 'succeeded')
@@ -1185,7 +1228,7 @@ export function createAgentRuntime(dependencies: {
           if (childTimedOut && !stopped) {
             completed = true;
             return (
-              answer ||
+              collectedAnswer() ||
               `Timed out after ${Math.round(childTimeoutMs / 1000)}s while working on "${title}". Use what other subagents found or try one quick lookup.`
             );
           }
@@ -1209,7 +1252,7 @@ export function createAgentRuntime(dependencies: {
             .catch(() => {});
         }
         signal.throwIfAborted();
-        return answer || 'The subagent finished without an answer.';
+        return collectedAnswer() || 'The subagent finished without an answer.';
       };
       const tools = bind(
         {
@@ -1333,7 +1376,12 @@ export function createAgentRuntime(dependencies: {
           if (deferredPause && !results?.some((result) => result.error !== undefined)) {
             const pending = deferredPause;
             deferredPause = undefined;
-            pausePromise = commitPause(pending.reason, pending.message, pending.choices);
+            pausePromise = commitPause(
+              pending.reason,
+              pending.message,
+              pending.choices,
+              pending.replyToMessageId,
+            );
             return true;
           }
           if (stopped || finalDelivered) return true;
@@ -1569,6 +1617,7 @@ export function createAgentRuntime(dependencies: {
         status = 'waiting_user';
         waitingFor = 'question';
         waitingMessage = paused();
+        waitingReplyTo = undefined;
       }
       if (!context.proactivity && status === 'succeeded' && !answered && !reported && lastNote)
         await deliverReply(lastNote);
@@ -1592,7 +1641,7 @@ export function createAgentRuntime(dependencies: {
         ...(answer ? { completed: answer } : {}),
         ...(waitingFor ? { waitingFor } : {}),
         ...(waitingMessage ? { message: waitingMessage } : {}),
-        ...(waitingMessage && spokeTo ? { replyToMessageId: spokeTo } : {}),
+        ...(waitingMessage && waitingReplyTo ? { replyToMessageId: waitingReplyTo } : {}),
         ...(answerChoices ? { answerChoices } : {}),
         ...(handoffBrowserId ? { handoffBrowserId } : {}),
       };

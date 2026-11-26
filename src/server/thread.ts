@@ -2169,7 +2169,7 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
     pool.query(
       `WITH seen AS (SELECT max(started_at) AS at FROM turns
          WHERE owner_id=$1 AND thread_id=$2 AND session_id=$6 AND id<>$4),
-       boundary AS (SELECT created_at AS at FROM turns WHERE owner_id=$1 AND thread_id=$2 AND id=$4)
+       boundary AS (SELECT created_at AS at,parent_turn_id,message_id FROM turns WHERE owner_id=$1 AND thread_id=$2 AND id=$4)
        SELECT role,text,audio_caption AS "audioCaption",created_at AS "createdAt",reaction,attachments,presentation,answer_choices AS "answerChoices",unseen,turn_id AS "turnId" FROM (
        SELECT m.role,m.text,m.audio_caption,m.created_at,m.id,m.reaction,m.attachments,m.presentation,m.answer_choices,m.turn_id,
        COALESCE(u.background AND m.created_at > COALESCE(seen.at,'-infinity'),false) AS unseen
@@ -2180,7 +2180,7 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
        AND NOT (m.role='user' AND u.status='queued')
        AND ($6::uuid<>$2::uuid OR m.created_at>COALESCE(th.chat_restarted_at,'-infinity'))
        AND (NOT $5::boolean OR (m.created_at<=boundary.at AND
-         (u.id IS NULL OR u.session_id=$6
+         (u.id IS NULL OR u.session_id=$6 OR m.id=boundary.message_id OR u.id=boundary.parent_turn_id
           OR (u.status IN ('succeeded','failed','cancelled') AND u.finished_at<=boundary.at))))
        ORDER BY m.created_at DESC,m.id DESC LIMIT 30) m ORDER BY created_at,id`,
       [ownerId, threadId, sourceMessageId, turn.id, Boolean(turn.background), turn.session_id],

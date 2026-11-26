@@ -870,7 +870,7 @@ function pageText(page: BrowserObservation) {
 function pageKey(url: string) {
   try {
     const page = new URL(url);
-    return `${page.origin}${page.pathname}`;
+    return `${page.origin}${page.pathname}${page.search}${page.hash}`;
   } catch {
     return url;
   }
@@ -1365,7 +1365,11 @@ export function nodTools(
             options: pick.choices.map((choice) => ({ ...choice, id: randomUUID() })),
             multiple: pick.multiple ?? false,
           }),
-          { deferred: true, answered: delivery.delivered },
+          {
+            deferred: true,
+            answered: delivery.delivered,
+            ...(p.replyToMessageId ? { replyToMessageId: p.replyToMessageId } : {}),
+          },
         );
         return {
           ...delivery,

@@ -258,31 +258,40 @@ export function createPublicLinkPreviewProvider(
       }
     },
     mapTile(zoom, x, y, stop) {
-      const key = `${zoom}/${((x % 2 ** zoom) + 2 ** zoom) % 2 ** zoom}/${y}`;
-      const cached = tiles.get(key);
-      if (cached && cached.expiresAt > Date.now()) return cached.value;
       if (stop?.aborted) return Promise.resolve(null);
-      tiles.delete(key);
-      const timeout = AbortSignal.timeout(Math.min(6000, options.timeoutMs ?? 6000));
-      const signal = stop ? AbortSignal.any([stop, timeout]) : timeout;
-      const value = fetchPublic(
-        `https://tile.openstreetmap.org/${key}.png`,
-        512 * 1024,
-        false,
-        signal,
-      )
-        .then((tile) => {
-          const mimeType = rasterImageType(tile.body);
-          return mimeType ? { bytes: tile.body, mimeType } : null;
-        })
-        .catch(() => null)
-        .then((tile) => {
-          if (!tile && tiles.get(key)?.value === value) tiles.delete(key);
-          return tile;
+      const key = `${zoom}/${((x % 2 ** zoom) + 2 ** zoom) % 2 ** zoom}/${y}`;
+      let entry = tiles.get(key);
+      if (!entry || entry.expiresAt <= Date.now()) {
+        tiles.delete(key);
+        const timeout = AbortSignal.timeout(Math.min(6000, options.timeoutMs ?? 6000));
+        const value = fetchPublic(
+          `https://tile.openstreetmap.org/${key}.png`,
+          512 * 1024,
+          false,
+          timeout,
+        )
+          .then((tile) => {
+            const mimeType = rasterImageType(tile.body);
+            return mimeType ? { bytes: tile.body, mimeType } : null;
+          })
+          .catch(() => null)
+          .then((tile) => {
+            if (!tile && tiles.get(key)?.value === value) tiles.delete(key);
+            return tile;
+          });
+        entry = { expiresAt: Date.now() + 7 * 86_400_000, value };
+        tiles.set(key, entry);
+        while (tiles.size > 256) tiles.delete(tiles.keys().next().value!);
+      }
+      if (!stop) return entry.value;
+      return new Promise<PreviewImage | null>((resolve) => {
+        const onAbort = () => resolve(null);
+        stop.addEventListener('abort', onAbort, { once: true });
+        entry.value.then((tile) => {
+          stop.removeEventListener('abort', onAbort);
+          resolve(stop.aborted ? null : tile);
         });
-      tiles.set(key, { expiresAt: Date.now() + 7 * 86_400_000, value });
-      while (tiles.size > 256) tiles.delete(tiles.keys().next().value!);
-      return value;
+      });
     },
     async icon(origin) {
       const signal = AbortSignal.timeout(Math.min(8000, options.timeoutMs ?? 8000));
