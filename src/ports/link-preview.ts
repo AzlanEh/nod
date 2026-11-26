@@ -10,6 +10,6 @@ export interface PreviewImage {
 
 export interface LinkPreviewProvider {
   icon(origin: string): Promise<SiteIcon | null>;
-  image?(url: string): Promise<PreviewImage | null>;
-  mapTile?(zoom: number, x: number, y: number): Promise<PreviewImage | null>;
+  image?(url: string, signal?: AbortSignal): Promise<PreviewImage | null>;
+  mapTile?(zoom: number, x: number, y: number, signal?: AbortSignal): Promise<PreviewImage | null>;
 }

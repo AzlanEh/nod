@@ -605,11 +605,7 @@ export function createPiAgent(options: {
       );
       if (budget.compact && input.compactInstructions)
         input = { ...input, ...input.compactInstructions };
-      const output = createContextOutput(
-        input.workspace,
-        input.shouldStop,
-        input.ownerContext?.split('\n', 1)[0],
-      );
+      const output = createContextOutput(input.workspace, input.ownerContext?.split('\n', 1)[0]);
       let toolCallCount = 1;
       const boundedOutput = async (
         name: string,
@@ -1244,7 +1240,7 @@ export function createPiAgent(options: {
       };
       const startEarly = (message: AssistantMessage, index: number) => {
         const call = message.content[index];
-        if (call?.type !== 'toolCall' || early.has(call.id) || input.shouldStop()) return;
+        if (call?.type !== 'toolCall' || early.has(call.id)) return;
         const tool = input.tools.find((item) => item.early && item.name === call.name);
         const definition = tools.find((item) => item.name === call.name);
         if (!tool || !definition || !activation?.getActiveTools().includes(call.name)) return;
@@ -1404,6 +1400,13 @@ export function createPiAgent(options: {
           else if (overflow || isRecoverableLength(event.message, model.maxTokens)) {
             settings.applyOverrides({ compaction: { keepRecentTokens: 0 } });
           }
+          if (
+            !['stop', 'toolUse'].includes(event.message.stopReason) &&
+            event.message.content.filter(
+              (part) => part.type === 'toolCall' && early.delete(part.id),
+            ).length
+          )
+            settings.applyOverrides({ retry: { enabled: false }, compaction: { enabled: false } });
           const usage = observeUsage(event.message);
           if (usage) input.onEvent({ ...usage, pricingSignature: usagePricing(event.message) });
           if (event.message.stopReason === 'error')

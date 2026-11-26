@@ -3112,10 +3112,7 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
             browserUrl: _browserUrl,
             canRename: _canRename,
             ...connection
-          }) => ({
-            ...connection,
-            ...(connection.savedLogin ? { browserAccess: 'sign_in_saved_login' } : {}),
-          }),
+          }) => connection,
         );
         const logins = connections.filter((connection) => connection.savedLogin);
         const matching = site

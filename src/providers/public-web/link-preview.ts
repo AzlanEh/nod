@@ -59,6 +59,9 @@ export const requestPublicPreview: PreviewRequest = ({
           ]),
         );
         const status = response.statusCode ?? 0;
+        const head =
+          metadata &&
+          /^(?:text\/html|application\/xhtml\+xml)(?:;|$)/i.test(headers['content-type'] ?? '');
         if ([301, 302, 303, 307, 308].includes(status)) {
           response.destroy();
           resolve({ status, headers, body: new Uint8Array() });
@@ -66,7 +69,7 @@ export const requestPublicPreview: PreviewRequest = ({
         }
         if (
           (headers['content-encoding'] && headers['content-encoding'] !== 'identity') ||
-          (!metadata && Number(headers['content-length']) > maxBytes)
+          (!head && Number(headers['content-length']) > maxBytes)
         ) {
           response.destroy();
           reject(new Error('Preview response is not supported.'));
@@ -77,13 +80,13 @@ export const requestPublicPreview: PreviewRequest = ({
         response.on('data', (chunk: Buffer) => {
           const remaining = maxBytes - length;
           length += chunk.length;
-          if (length > maxBytes && !metadata) {
+          if (length > maxBytes && !head) {
             response.destroy(new Error('Preview response is too large.'));
             return;
           }
           chunks.push(chunk.subarray(0, remaining));
           if (
-            metadata &&
+            head &&
             (length >= maxBytes || Buffer.concat(chunks).includes(Buffer.from('</head>')))
           ) {
             response.destroy();
@@ -175,6 +178,7 @@ export function createPublicLinkPreviewProvider(
   options: { resolver?: AddressResolver; request?: PreviewRequest; timeoutMs?: number } = {},
 ): LinkPreviewProvider {
   const request = options.request ?? requestPublicPreview;
+  const tiles = new Map<string, { expiresAt: number; value: Promise<PreviewImage | null> }>();
   async function fetchPublic(
     value: string,
     maxBytes: number,
@@ -228,15 +232,16 @@ export function createPublicLinkPreviewProvider(
     throw new Error('Too many preview redirects.');
   }
   return {
-    async image(value) {
-      const signal = AbortSignal.timeout(Math.min(6000, options.timeoutMs ?? 6000));
+    async image(value, stop) {
+      const timeout = AbortSignal.timeout(Math.min(6000, options.timeoutMs ?? 6000));
+      const signal = stop ? AbortSignal.any([stop, timeout]) : timeout;
       const imageMax = 3 * 1024 * 1024;
       const raster = (body: Uint8Array): PreviewImage | null => {
         const mimeType = rasterImageType(body);
         return mimeType ? { bytes: body, mimeType } : null;
       };
       try {
-        const first = await fetchPublic(value, imageMax, false, signal);
+        const first = await fetchPublic(value, imageMax, true, signal);
         if (/^image\//i.test(first.headers['content-type'] ?? '')) return raster(first.body);
         if (
           !/^(?:text\/html|application\/xhtml\+xml)(?:;|$)/i.test(
@@ -252,21 +257,32 @@ export function createPublicLinkPreviewProvider(
         return null;
       }
     },
-    async mapTile(zoom, x, y) {
-      const signal = AbortSignal.timeout(Math.min(6000, options.timeoutMs ?? 6000));
-      const tiles = 2 ** zoom;
-      try {
-        const tile = await fetchPublic(
-          `https://tile.openstreetmap.org/${zoom}/${((x % tiles) + tiles) % tiles}/${y}.png`,
-          512 * 1024,
-          false,
-          signal,
-        );
-        const mimeType = rasterImageType(tile.body);
-        return mimeType ? { bytes: tile.body, mimeType } : null;
-      } catch {
-        return null;
-      }
+    mapTile(zoom, x, y, stop) {
+      const key = `${zoom}/${((x % 2 ** zoom) + 2 ** zoom) % 2 ** zoom}/${y}`;
+      const cached = tiles.get(key);
+      if (cached && cached.expiresAt > Date.now()) return cached.value;
+      if (stop?.aborted) return Promise.resolve(null);
+      tiles.delete(key);
+      const timeout = AbortSignal.timeout(Math.min(6000, options.timeoutMs ?? 6000));
+      const signal = stop ? AbortSignal.any([stop, timeout]) : timeout;
+      const value = fetchPublic(
+        `https://tile.openstreetmap.org/${key}.png`,
+        512 * 1024,
+        false,
+        signal,
+      )
+        .then((tile) => {
+          const mimeType = rasterImageType(tile.body);
+          return mimeType ? { bytes: tile.body, mimeType } : null;
+        })
+        .catch(() => null)
+        .then((tile) => {
+          if (!tile && tiles.get(key)?.value === value) tiles.delete(key);
+          return tile;
+        });
+      tiles.set(key, { expiresAt: Date.now() + 7 * 86_400_000, value });
+      while (tiles.size > 256) tiles.delete(tiles.keys().next().value!);
+      return value;
     },
     async icon(origin) {
       const signal = AbortSignal.timeout(Math.min(8000, options.timeoutMs ?? 8000));

@@ -12,6 +12,7 @@ import {
   Draft,
   FactList,
   Items,
+  pickLinks,
   Schedule,
 } from './presentation-cards';
 import { PresentationChart } from './presentation-chart';
@@ -101,7 +102,9 @@ export function MessagePresentation({
       {visual.type === 'compare' && <Compare visual={visual} />}
       {visual.type === 'draft' && <Draft visual={visual} />}
       {'note' in visual && <CardNote note={visual.note} />}
-      {(visual.type === 'items' || visual.type === 'compare') && <CardPickSend />}
+      {(visual.type === 'items' || visual.type === 'compare') && (
+        <CardPickSend links={pickLinks(visual)} />
+      )}
       {visual.type !== 'flights' && (visual.asOf || visual.sources.length > 0) && (
         <details className="presentation-sources">
           <summary>

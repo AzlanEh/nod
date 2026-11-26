@@ -2544,8 +2544,19 @@ test('browser steps run in order, stop at stale refs, unmet waits, failures and 
   const outputs: string[] = [];
   const text = (result: Awaited<ReturnType<typeof call>>) =>
     result.content.map((part) => ('text' in part ? part.text : '')).join('\n');
-  await taskFixture(
+  const turn = await taskFixture(
     async (tools) => {
+      outputs.push(
+        text(
+          await call(tools, 'browser', {
+            action: 'steps',
+            steps: [
+              { action: 'click', selector: '#first' },
+              { action: 'click', selector: '@e9' },
+            ],
+          }),
+        ),
+      );
       outputs.push(
         text(
           await call(tools, 'browser', {
@@ -2591,6 +2602,27 @@ test('browser steps run in order, stop at stale refs, unmet waits, failures and 
         }),
         /Ran 1 of 3 steps: scroll\. Step 2 \(click\) failed and may have taken effect/,
       );
+      await assert.rejects(
+        call(tools, 'browser', {
+          action: 'steps',
+          steps: [
+            { action: 'scroll', direction: 'down' },
+            { action: 'click', selector: '#refused' },
+          ],
+        }),
+        /Ran 1 of 2 steps: scroll\. Step 2 \(click\) did not run; later steps did not run\./,
+      );
+      outputs.push(
+        text(
+          await call(tools, 'browser', {
+            action: 'steps',
+            steps: [
+              { action: 'click', selector: '#covered' },
+              { action: 'click', selector: '#after-covered' },
+            ],
+          }),
+        ),
+      );
       outputs.push(
         text(
           await call(tools, 'browser', {
@@ -2610,10 +2642,24 @@ test('browser steps run in order, stop at stale refs, unmet waits, failures and 
         }),
         /only as the last step/,
       );
+      outputs.push(
+        text(
+          await call(tools, 'browser', {
+            action: 'steps',
+            steps: [
+              { action: 'fill', selector: '#approve-name', text: 'Synthetic name' },
+              { action: 'click', selector: '#approve' },
+              { action: 'click', selector: '#after-approve' },
+            ],
+          }),
+        ),
+      );
     },
     {
       browserStep: async ({ step }) => {
         checked.push(step.selector ?? '');
+        if (step.selector === '#refused') return 'refused';
+        if (step.selector === '#approve') return { [appConfirmation]: 'Submit the form?' };
         return step.selector === '#blocked' ? { result: 'Blocked' } : 'run';
       },
     },
@@ -2627,6 +2673,8 @@ test('browser steps run in order, stop at stale refs, unmet waits, failures and 
         act: async (_id, step) => {
           acted.push(`${step.action} ${step.selector ?? step.url ?? step.script ?? ''}`.trim());
           if (step.selector === '#broken') throw new Error('Synthetic browser failure');
+          if (step.selector === '#covered')
+            throw new BrowserActionError('browser_click_intercepted');
           if (step.action === 'open') url = step.url!;
           if (step.selector === '@e2') url = 'https://example.com/next';
           if (step.action === 'evaluate') return { url, text: 'Synthetic title' };
@@ -2637,6 +2685,7 @@ test('browser steps run in order, stop at stale refs, unmet waits, failures and 
     },
   );
   assert.deepEqual(acted, [
+    'click #first',
     'open https://example.com/results',
     'evaluate document.title',
     'fill #query',
@@ -2644,17 +2693,35 @@ test('browser steps run in order, stop at stale refs, unmet waits, failures and 
     'wait',
     'scroll',
     'click #broken',
+    'scroll',
+    'click #covered',
     'fill #name',
+    'fill #approve-name',
   ]);
-  assert.deepEqual(checked, ['@e2', '#broken', '#blocked']);
-  assert.match(outputs[0]!, /Ran 3 of 3 steps: open, evaluate, fill\./);
-  assert.match(outputs[0]!, /Step 2 \(evaluate\):\nURL: \S+\nSynthetic title/);
-  assert.match(outputs[0]!, /Synthetic page at https:\/\/example.com\/results/);
-  assert.match(outputs[1]!, /Ran 1 of 2 steps: click\.\n\nStopped before Step 2 \(click\)/);
-  assert.match(outputs[1]!, /Synthetic page at https:\/\/example.com\/next/);
-  assert.match(outputs[2]!, /Ran 1 of 2 steps: wait\.\n\nThe wait in step 1 \(wait\) was not met/);
-  assert.match(outputs[3]!, /Step 2 \(click\) and the steps after it did not run/);
-  assert.match(outputs[3]!, /Blocked/);
+  assert.deepEqual(checked, [
+    '#first',
+    '@e2',
+    '#broken',
+    '#refused',
+    '#covered',
+    '#blocked',
+    '#approve',
+  ]);
+  assert.match(outputs[0]!, /Ran 1 of 2 steps: click\.\n\nStopped before Step 2 \(click\)/);
+  assert.match(outputs[1]!, /Ran 3 of 3 steps: open, evaluate, fill\./);
+  assert.match(outputs[1]!, /Step 2 \(evaluate\):\nURL: \S+\nSynthetic title/);
+  assert.match(outputs[1]!, /Synthetic page at https:\/\/example.com\/results/);
+  assert.match(outputs[2]!, /Ran 1 of 2 steps: click\.\n\nStopped before Step 2 \(click\)/);
+  assert.match(outputs[2]!, /Synthetic page at https:\/\/example.com\/next/);
+  assert.match(outputs[3]!, /Ran 1 of 2 steps: wait\.\n\nThe wait in step 1 \(wait\) was not met/);
+  assert.match(outputs[4]!, /Ran 0 of 2 steps\.\n\nStep 1 \(click\) did not run/);
+  assert.match(outputs[5]!, /Step 2 \(click\) and the steps after it did not run/);
+  assert.match(outputs[5]!, /Blocked/);
+  assert.match(outputs[6]!, /Ran 1 of 3 steps: fill\.[\s\S]*Step 2 \(click\) and the steps after/);
+  assert.match(outputs[6]!, /confirmation question is in chat/);
+  assert.match(outputs[5]!, /untrusted_tool_result/);
+  assert.doesNotMatch(outputs[6]!, /untrusted_tool_result/);
+  assert.equal(turn.result.status, 'waiting_user');
 });
 
 test('browser handoff requires a live page, binds its session and stops further work without a link', async () => {

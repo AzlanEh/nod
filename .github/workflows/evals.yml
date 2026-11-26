@@ -298,9 +298,9 @@ jobs:
   evals:
     name: Capability evals
     needs: [plan, shard]
-    if: always() && (needs.plan.outputs.noop == 'true' || needs.plan.outputs.run == 'true')
+    if: ${{ !cancelled() && (needs.plan.outputs.noop == 'true' || needs.plan.outputs.run == 'true') }}
     runs-on: blacksmith-8vcpu-ubuntu-2404
-    timeout-minutes: 90
+    timeout-minutes: 180
     outputs:
       verdict: ${{ steps.merge.outputs.verdict }}
     env:
@@ -375,6 +375,15 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p .local/capability-evals
+          inconclusive() {
+            if [ -n "$BASELINE_REF" ]; then
+              printf '### INCONCLUSIVE against `%s`\n\n- %s\n' "$BASELINE_NAME" "$1" > ".local/capability-evals/$CANDIDATE-gate.md"
+              REASON="$1" node -e 'process.stdout.write(JSON.stringify({ verdict: "INCONCLUSIVE", blocking: [], unclear: [process.env.REASON] }, null, 2))' > ".local/capability-evals/$CANDIDATE-gate.json"
+              echo "verdict=INCONCLUSIVE" >> "$GITHUB_OUTPUT"
+            fi
+            echo "::error::$1"
+            exit 1
+          }
           if [ "$NOOP" = "true" ]; then
             printf '### GO against %s\n\nNothing the evals exercise changed, so nothing was run.\n' "$BASELINE_NAME" > ".local/capability-evals/$CANDIDATE-gate.md"
             echo "verdict=GO" >> "$GITHUB_OUTPUT"
@@ -388,8 +397,7 @@ jobs:
             fi
           done
           if [ "${#candidate_shards[@]}" -ne "$SHARDS" ]; then
-            echo "::error::Expected $SHARDS candidate shards, got ${#candidate_shards[@]}."
-            exit 1
+            inconclusive "Expected $SHARDS candidate shards with results, got ${#candidate_shards[@]}; a failed harness canary stops shard 1."
           fi
           pnpm run eval:capability merge "${candidate_shards[@]}" --label "$CANDIDATE"
           for s in "${candidate_shards[@]}"; do rm -rf ".local/capability-evals/$s"; done
@@ -401,8 +409,7 @@ jobs:
 
           if [ -n "$BASELINE_RUN" ]; then
             if [ ! -f ".local/capability-evals/$BASELINE_LABEL/manifest.json" ]; then
-              echo "::error::Nightly run $BASELINE_RUN has no $BASELINE_LABEL results."
-              exit 1
+              inconclusive "Nightly run $BASELINE_RUN has no $BASELINE_LABEL results."
             fi
           else
             baseline_shards=()
@@ -413,14 +420,13 @@ jobs:
               fi
             done
             if [ "${#baseline_shards[@]}" -ne "$SHARDS" ]; then
-              echo "::error::Expected $SHARDS baseline shards, got ${#baseline_shards[@]}."
-              exit 1
+              inconclusive "Expected $SHARDS baseline shards with results, got ${#baseline_shards[@]}."
             fi
             pnpm run eval:capability merge "${baseline_shards[@]}" --label "$BASELINE_LABEL"
             for s in "${baseline_shards[@]}"; do rm -rf ".local/capability-evals/$s"; done
           fi
 
-          gate_args=(--model "$MODEL" --judge anthropic/claude-sonnet-5-5 --tier "$TIER" --repeat "$REPEAT" --concurrency 4 --baseline "$BASELINE_REF" --baseline-label "$BASELINE_LABEL" --candidate-label "$CANDIDATE" --label "$CANDIDATE")
+          gate_args=(--model "$MODEL" --judge anthropic/claude-sonnet-5-5 --tier "$TIER" --repeat "$REPEAT" --concurrency 4 --baseline "$BASELINE_NAME" --baseline-label "$BASELINE_LABEL" --candidate-label "$CANDIDATE" --label "$CANDIDATE")
           if [ -n "$BUDGET" ]; then gate_args+=(--budget "$BUDGET"); fi
           pnpm run eval:capability gate "${gate_args[@]}"
           echo "verdict=$(node -p "require('./.local/capability-evals/$CANDIDATE-gate.json').verdict")" >> "$GITHUB_OUTPUT"

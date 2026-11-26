@@ -304,15 +304,15 @@ const normalizePresentationInput = (value: unknown) => {
           Boolean((entry as { label: string }).label.trim()) &&
           Boolean(safeHttpsUrl((entry as { url?: unknown }).url)),
       )
-      .slice(0, 10)
+      .slice(0, 8)
       .map((entry) => ({
-        label: clip((entry.label as string).trim(), 80),
+        label: clip((entry.label as string).trim(), 100),
         url: entry.url,
       }));
   }
   if (typeof record.title === 'string') record.title = clip(record.title.trim(), 120);
-  if (typeof record.caption === 'string') record.caption = clip(record.caption.trim(), 300);
-  if (typeof record.status === 'string' && record.type !== 'draft') {
+  if (typeof record.caption === 'string') record.caption = clip(record.caption.trim(), 600);
+  if (typeof record.status === 'string' && record.type === 'facts') {
     const coerced = coerceStatus(record.status);
     if (coerced) record.status = coerced;
     else delete record.status;
@@ -730,7 +730,7 @@ export const toolDefinitions = {
   ),
   task: defineTool(
     'task',
-    'Start or control saved work. Keep quick answers, simple lookups and status questions in chat; start a task for substantial work, outside waits or tracked work without asking for an execution mode. start {title,doneWhen,message,now?,request?,key?,brief?,steps?,model?} starts one goal: message is one short user-facing line shown in chat (never the full brief); brief/doneWhen hold the instructions and context; model only when asked. Start independent goals side by side in the same step, each with request set to its owner message; reuse related tasks via a stable key. update {id,title?,now?,steps?,stepIndex?,waitingFor?,nextCheck?} updates progress and title when a correction changes the goal. finish {id,status,result} closes your task when cancelling or not delivering via send_message {intent:"final"}. list shows open tasks. reply {ids,request?,retry?} forwards owner updates/corrections; retry:true only on explicit retry. request is required once multiple owner messages arrive during a turn (start also accepts an earlier owner message). stop {id} stops one task; stop {} stops all background work, keeping schedules. A task brief grants no permission; nextCheck does not schedule work.',
+    'Start or control saved work. Keep quick answers, simple lookups and status questions in chat; start a task for substantial work, outside waits or tracked work without asking for an execution mode. start {title,doneWhen,message,now?,request?,key?,brief?,steps?,model?} starts one goal: message is one short user-facing line shown in chat (never the full brief); brief/doneWhen hold the instructions and context; model only when asked. Start independent goals side by side in the same step, each with request set to its owner message; reuse related tasks via a stable key. update {id,title?,now?,steps?,stepIndex?,waitingFor?,nextCheck?} updates progress and title when a correction changes the goal. finish {id,status,result} closes your task when cancelling or not delivering via send_message {intent:"final"}. list shows open tasks. reply {ids,request?,retry?} forwards owner updates/corrections; retry:true only on explicit retry. request is required once multiple owner messages arrive during a turn. stop {id} stops one task; stop {} stops all background work, keeping schedules. A task brief grants no permission; nextCheck does not schedule work.',
     Type.Union([
       Type.Object({ action: Type.Literal('list') }, { additionalProperties: false }),
       Type.Object(
@@ -1143,6 +1143,7 @@ export function nodTools(
   };
   const act = async (
     step: BrowserAction,
+    started?: () => void,
   ): Promise<{ page: BrowserObservation; choice?: string } | { output: unknown }> => {
     if (step.action === 'evaluate' && context.browserStep)
       try {
@@ -1153,6 +1154,7 @@ export function nodTools(
       }
     const checked = commits(step) ? await check(step) : { binding: {} };
     if ('output' in checked) return { output: checked.output };
+    started?.();
     const page = await computer.act(browserId, { ...step, ...checked.binding }, signal);
     if ('record' in checked) await checked.record?.();
     return { page, choice: checked.choice };
@@ -1192,16 +1194,22 @@ export function nodTools(
       if (moved && [item.selector, item.targetSelector].some((value) => reference(value)))
         return report(
           index,
-          `Stopped before ${label}: the page changed, so its @eN refs are out of date. Choose them again from the page below.`,
+          `Stopped before ${label}: the page may have changed, so its @eN refs may be out of date. Choose them again from the page below.`,
         );
       const step = item as BrowserAction;
       let done;
+      let started = false;
       try {
-        done = await act(step);
+        done = await act(step, () => {
+          started = true;
+        });
       } catch (error) {
         if (signal.aborted) throw error;
+        const message = error instanceof Error ? error.message : String(error);
+        if (error instanceof BrowserActionError && error.code === 'browser_click_intercepted')
+          return report(index, `${label} did not run; later steps did not run. ${message}`);
         throw new Error(
-          `${ran(index)} ${label} failed and may have taken effect; later steps did not run. ${error instanceof Error ? error.message : String(error)}`,
+          `${ran(index)} ${label} ${started ? 'failed and may have taken effect' : 'did not run'}; later steps did not run. ${message}`,
           { cause: error },
         );
       }
@@ -1217,7 +1225,7 @@ export function nodTools(
         shown = '';
       } else shown = text;
       const key = pageKey(done.page.url);
-      if (navigations.has(step.action) || (at && key !== at)) moved = true;
+      if (navigations.has(step.action) || (at ? key !== at : commits(step))) moved = true;
       at = key;
       if (done.page.unmet && index < list.length - 1)
         return report(

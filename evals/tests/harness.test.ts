@@ -4625,6 +4625,25 @@ test('sharding partitions scenarios cleanly and mergeRuns combines shard outputs
       /different model/,
     );
 
+    await writeShard('p1', 'latest-email', 'pass');
+    const shardManifest = JSON.parse(await readFile(join(root, 'p1', 'manifest.json'), 'utf8'));
+    shardManifest.shard = { index: 1, total: 2, scenarioIds: ['book-dinner', 'latest-email'] };
+    await writeFile(join(root, 'p1', 'manifest.json'), JSON.stringify(shardManifest));
+    const partial = await mergeRuns({ root, labels: ['p1'], label: 'partial' });
+    assert.deepEqual(partial.manifest.scenarioIds, ['book-dinner', 'latest-email']);
+    assert.deepEqual(partial.summary.coverage.missing, ['book-dinner.1']);
+    assert.equal(partial.manifest.provenance.missingShards, '2');
+    const partialGate = await evaluateGate({
+      root,
+      baselineLabel: 'combined',
+      candidateLabel: 'partial',
+      baselineName: 'main',
+      label: 'partial',
+      resample: 0,
+    });
+    assert.equal(partialGate.verdict, 'INCONCLUSIVE');
+    assert.match(partialGate.unclear.join('\n'), /missing shards 2/);
+
     const gate = await evaluateGate({
       root,
       baselineLabel: 'combined',

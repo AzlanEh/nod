@@ -71,6 +71,8 @@
 }
 .card-pick-write:focus-visible {
   border-color: var(--ring);
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
 }
 .card-pick-closed {
   display: inline-flex;
@@ -209,6 +211,9 @@
   border-radius: 9px;
   object-fit: contain;
   background: var(--surface-subtle);
+}
+img:is(.card-thumb[data-logo], .card-contender-image) {
+  background: var(--gray-0);
 }
 span:is(.card-thumb, .card-contender-image) {
   background: var(--surface-subtle);
@@ -969,7 +974,7 @@ button.card-contender {
   overflow-wrap: anywhere;
   line-height: 1.55;
 }
-.card-draft-open {
+.card-pick-open {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -978,6 +983,6 @@ button.card-contender {
   font-size: 13px;
   text-decoration: none;
 }
-.card-draft-open:hover {
+.card-pick-open:hover {
   color: var(--foreground);
 }

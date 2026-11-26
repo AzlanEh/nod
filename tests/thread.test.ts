@@ -2387,6 +2387,33 @@ test(
               anchor: 1,
             },
             {
+              prompt: 'Check the synthetic booking for Lisbon.',
+              prior: "I'll need your synthetic booking reference for Lisbon",
+              start: 'Checking your synthetic booking reference for Lisbon',
+              expected: [
+                "I'll need your synthetic booking reference for Lisbon",
+                'Checking your synthetic booking reference for Lisbon',
+              ],
+              anchor: 1,
+            },
+            {
+              prompt: 'Check the synthetic morning flight to Lisbon.',
+              prior: 'On it, I will check the synthetic 9:40 flight to Lisbon',
+              start: 'Checking the synthetic flight to Lisbon',
+              expected: [
+                'On it, I will check the synthetic 9:40 flight to Lisbon',
+                'Checking the synthetic flight to Lisbon',
+              ],
+              anchor: 1,
+            },
+            {
+              prompt: 'Check the synthetic 9:40 flight to Lisbon.',
+              prior: 'On it, I will check the synthetic 9:40 flight to Lisbon',
+              start: 'Checking the synthetic 9:40 flight to Lisbon',
+              expected: ['On it, I will check the synthetic 9:40 flight to Lisbon'],
+              anchor: 0,
+            },
+            {
               prompt: 'Check the synthetic invoice due Friday.',
               prior: 'No, the synthetic invoice is due Friday.',
               start: 'Check the synthetic invoice due Friday.',
@@ -3199,11 +3226,10 @@ test(
               [context.threadId, [context.currentMessageId, later!.id]],
             )
           ).rows[0];
-          if (earlier)
-            await start(earlier.id).then(
-              () => outcomes.push('started earlier'),
-              (error: Error) => outcomes.push(error.message),
-            );
+          await start(earlier!.id).then(
+            () => outcomes.push('started earlier'),
+            (error: Error) => outcomes.push(error.message),
+          );
           await context.task!({
             action: 'reply',
             request: randomUUID(),
@@ -3224,8 +3250,8 @@ test(
           await waitFor(settled(active.turnId));
           assert.deepEqual(outcomes, [
             'The owner sent several messages during this turn. Set request to the messageId of the one this work serves.',
-            'request must be the messageId of an owner message in this chat, such as currentMessageId or one sent while you worked.',
-            'started earlier',
+            'request must be currentMessageId or the messageId of an owner message sent while you worked.',
+            'request must be currentMessageId or the messageId of an owner message sent while you worked.',
             'request must be currentMessageId or the messageId of an owner message sent while you worked.',
           ]);
           const { rows } = await db.pool.query<{ source: string; prompt: string }>(
@@ -5077,6 +5103,10 @@ test(
             ]);
             assert.equal(
               inputs.filter((input) => input.message === 'Synthetic quick question').length,
+              1,
+            );
+            assert.equal(
+              inputs.filter((input) => input.message === 'Synthetic greeting').length,
               1,
             );
             assert.ok(inputs.every((input) => input.working?.startsWith(prompt)));

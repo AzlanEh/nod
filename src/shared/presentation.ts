@@ -300,11 +300,18 @@ const itemsPresentation = itemsInput.extend({
 
 export const mapTileSize = 256;
 
-export function mapPoint(location: { latitude: number; longitude: number }, zoom: number) {
+const wrap = (value: number, size: number) => ((value % size) + size) % size;
+
+export function mapPoint(
+  location: { latitude: number; longitude: number },
+  zoom: number,
+  frameX?: number,
+) {
   const size = mapTileSize * 2 ** zoom;
   const sin = Math.sin((Math.max(-85, Math.min(85, location.latitude)) * Math.PI) / 180);
+  const x = ((location.longitude + 180) / 360) * size;
   return {
-    x: ((location.longitude + 180) / 360) * size,
+    x: frameX === undefined ? x : frameX * mapTileSize + wrap(x - frameX * mapTileSize, size),
     y: (0.5 - Math.log((1 + sin) / (1 - sin)) / (4 * Math.PI)) * size,
   };
 }
@@ -316,8 +323,19 @@ export function mapFrame(
 ) {
   if (!locations.length) return null;
   const pad = 36;
+  const longitudes = locations
+    .map((location) => wrap(location.longitude, 360))
+    .sort((a, b) => a - b);
+  const gaps = longitudes.map(
+    (value, index) => (longitudes[index + 1] ?? longitudes[0]! + 360) - value,
+  );
+  const west = longitudes[(gaps.indexOf(Math.max(...gaps)) + 1) % longitudes.length]!;
+  const unwrapped = locations.map((location) => ({
+    latitude: location.latitude,
+    longitude: west + wrap(location.longitude - west, 360),
+  }));
   for (let zoom = 16; zoom >= 2; zoom--) {
-    const points = locations.map((location) => mapPoint(location, zoom));
+    const points = unwrapped.map((location) => mapPoint(location, zoom));
     const xs = points.map((point) => point.x);
     const ys = points.map((point) => point.y);
     const centerX = (Math.min(...xs) + Math.max(...xs)) / 2;
@@ -331,7 +349,7 @@ export function mapFrame(
         point.y >= y * mapTileSize + pad &&
         point.y <= (y + rows) * mapTileSize - pad,
     );
-    if (fits) return { zoom, x, y, columns, rows };
+    if (fits) return { zoom, x: wrap(x, 2 ** zoom), y, columns, rows };
   }
   return null;
 }
@@ -807,13 +825,14 @@ function pickLabels(value: Presentation) {
 export const draftSendLabel = 'Send it';
 
 export function presentationChoices(value: Presentation) {
-  if (value.type === 'compare') return pickLabels(value);
+  if (value.type === 'compare')
+    return value.winner === undefined && !value.verdict ? pickLabels(value) : [];
   if (value.type === 'draft' && value.status === 'draft') return [{ label: draftSendLabel }];
   if (
     value.type === 'items' &&
     value.items.length >= 2 &&
     value.items.length <= 6 &&
-    !value.items.some((item) => item.status)
+    !value.items.some((item) => item.status || item.badge)
   )
     return pickLabels(value);
   return [];
@@ -936,7 +955,9 @@ export function flightItems(value: FlightsPresentation): ItemsPresentation {
           120,
         ),
         ...(sub ? { sub: clip(sub, 160) } : {}),
-        ...(option.recommended && option.status !== 'booked' ? { badge: 'Best' } : {}),
+        ...(option.recommended && option.status !== 'booked' && option.status !== 'unknown'
+          ? { badge: 'Best' }
+          : {}),
         ...(option.status === 'booked'
           ? { status: { label: 'Booked', tone: 'done' as const } }
           : {}),
@@ -1291,6 +1312,8 @@ export function presentationText(value: Presentation) {
         .join(' | '),
     );
     for (const row of value.rows) lines.push(`${row.label}: ${row.values.join(' | ')}`);
+    for (const column of value.columns.map(compareColumn))
+      if (column.url) lines.push(`${column.label}: ${column.url}`);
   }
   if ('note' in value && value.note) lines.push(value.note);
   if (value.type === 'diagram') {

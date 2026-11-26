@@ -3164,6 +3164,86 @@ test('a question waits until messages queued during the step are read', async (t
   assert.equal(result.status, 'waiting_user');
 });
 
+test('sign-in and saved-session approvals wait until queued messages are read', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'nod-read-first-sign-in-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const outputs: string[] = [];
+  const steered: string[] = [];
+  let queued = 2;
+  const runtime = createAgentRuntime({
+    agent: {
+      open: async (input) => ({
+        resumed: false,
+        abort() {},
+        dispose() {},
+        prompt: async () => {
+          const tool = (name: string) => input.tools.find((candidate) => candidate.name === name)!;
+          const run = async (name: string, params: Record<string, unknown>) =>
+            outputs.push(
+              JSON.stringify(
+                await tool(name)
+                  .execute(params)
+                  .catch((error) => error.message),
+              ),
+            );
+          const read = async () => {
+            await input.nextMessages!();
+            await tool('send_message').execute({
+              text: `Synthetic update ${steered.length} noted.`,
+              replyToMessageId: steered.at(-1),
+            });
+          };
+          const session = {
+            action: 'use',
+            url: 'https://example.com',
+            connectionId: randomUUID(),
+          };
+          await run('sign_in', {
+            origin: 'https://example.com',
+            label: 'Synthetic login',
+            message: 'Sign in privately.',
+            action: 'Sign in',
+          });
+          await read();
+          await run('browser_session', session);
+          await read();
+          await run('browser_session', session);
+        },
+      }),
+      dispose() {},
+    },
+    computer: fakeComputer(),
+    workspace: fakeWorkspace(),
+  });
+  t.after(() => runtime.dispose());
+  const result = await runtime.runTurn({
+    ...context(directory),
+    turnId: randomUUID(),
+    prompt: 'Open the synthetic account',
+    hasQueuedMessages: async () => queued > 0,
+    takeMessages: async () => {
+      if (!queued) return [];
+      queued--;
+      steered.push(randomUUID());
+      return [{ id: steered.at(-1)!, text: 'Synthetic update', attachments: [] }];
+    },
+    requestCredential: async (_input, admit) => {
+      await admit?.(true);
+      return { [appConfirmation]: 'Sign in to the synthetic site?' };
+    },
+    browserConnection: async (_request, admit) => {
+      await admit?.(true);
+      return { [appConfirmation]: 'Use the saved synthetic session?' };
+    },
+    reply: async () => {},
+  });
+  assert.match(outputs[0]!, /new messages you have not read yet/);
+  assert.match(outputs[1]!, /new messages you have not read yet/);
+  assert.match(outputs[2]!, /confirmation question is in chat/);
+  assert.equal(result.status, 'waiting_user');
+  assert.equal(result.waitingFor, 'approval');
+});
+
 test('a reply quotes only the owner message it names, never a guessed one', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'nod-own-answer-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -4085,41 +4165,44 @@ test('send_message validates structured visuals and delivers each distinct prese
       );
     });
   await t.test('closing text that restates a sent answer is not posted again', async (t) => {
-    const replies: Array<Parameters<RuntimeContext['reply']>> = [];
     const sent =
       'Synthetic total is about 2,286 units. These use the latest synthetic reference figures from yesterday, and two other feeds agree within a small margin. Your provider will add its own markup, so expect a little less.';
-    const restated =
-      'Synthetic total is about 2,286 units. These use the latest synthetic reference figures from yesterday, and two other feeds agree within a small margin. Your provider will add its own fee, so expect a bit less.';
-    const runtime = createAgentRuntime({
-      agent: {
-        open: async (input) => ({
-          resumed: false,
-          abort() {},
+    for (const [restated, posted] of [
+      [sent.replace('markup, so expect a little', 'fee, so expect a bit'), [sent]],
+      [sent.replace('2,286', '2,296'), [sent, sent.replace('2,286', '2,296')]],
+    ] as const) {
+      const replies: Array<Parameters<RuntimeContext['reply']>> = [];
+      const runtime = createAgentRuntime({
+        agent: {
+          open: async (input) => ({
+            resumed: false,
+            abort() {},
+            dispose() {},
+            prompt: async () => {
+              const send = input.tools.find((tool) => tool.name === 'send_message')!;
+              await send.execute({ text: sent });
+              input.onEvent({ type: 'final', text: restated });
+            },
+          }),
           dispose() {},
-          prompt: async () => {
-            const send = input.tools.find((tool) => tool.name === 'send_message')!;
-            await send.execute({ text: sent });
-            input.onEvent({ type: 'final', text: restated });
-          },
-        }),
-        dispose() {},
-      },
-      computer: fakeComputer(),
-      workspace: fakeWorkspace(),
-    });
-    t.after(() => runtime.dispose());
-    const result = await runtime.runTurn({
-      ...context(directory),
-      turnId: randomUUID(),
-      reply: async (...args) => {
-        replies.push(args);
-      },
-    });
-    assert.equal(result.status, 'succeeded');
-    assert.deepEqual(
-      replies.map((reply) => reply[0]),
-      [sent],
-    );
+        },
+        computer: fakeComputer(),
+        workspace: fakeWorkspace(),
+      });
+      t.after(() => runtime.dispose());
+      const result = await runtime.runTurn({
+        ...context(directory),
+        turnId: randomUUID(),
+        reply: async (...args) => {
+          replies.push(args);
+        },
+      });
+      assert.equal(result.status, 'succeeded');
+      assert.deepEqual(
+        replies.map((reply) => reply[0]),
+        posted,
+      );
+    }
   });
   await t.test('a card to pick from asks with its rows as answer choices', async (t) => {
     const replies: Array<Parameters<RuntimeContext['reply']>> = [];
@@ -4204,10 +4287,11 @@ test('send_message validates structured visuals and delivers each distinct prese
     assert.equal(result.answerChoices?.multiple, false);
   });
 
-  await t.test('a card with pick does not abort the turn when a sibling tool failed', async (t) => {
+  await t.test('a card with pick waits after a sibling tool failure is retried', async (t) => {
     const replies: Array<Parameters<RuntimeContext['reply']>> = [];
     const row = (index: number) => ({ title: `Option ${index}`, value: `€${index}0` });
     let continued = false;
+    let stopped = false;
     const runtime = createAgentRuntime({
       agent: {
         open: async (input) => ({
@@ -4225,6 +4309,7 @@ test('send_message validates structured visuals and delivers each distinct prese
               { name: 'task', error: 'Invalid task input' },
               { name: 'send_message' },
             ]);
+            stopped = input.shouldStop([{ name: 'task' }]);
           },
         }),
         dispose() {},
@@ -4241,11 +4326,14 @@ test('send_message validates structured visuals and delivers each distinct prese
       },
     });
     assert.equal(continued, true);
+    assert.equal(stopped, true);
     assert.equal(replies.length, 1);
-    assert.equal(result.status, 'succeeded');
+    assert.equal(result.status, 'waiting_user');
+    assert.equal(result.message, 'Which one?');
+    assert.equal(result.answerChoices?.options.length, 2);
   });
 
-  await t.test('a draft presentation keeps its string status through normalization', async (t) => {
+  await t.test('normalization keeps a draft status and coerces a facts status', async (t) => {
     const replies: Array<Parameters<RuntimeContext['reply']>> = [];
     const runtime = createAgentRuntime({
       agent: {
@@ -4267,6 +4355,17 @@ test('send_message validates structured visuals and delivers each distinct prese
                 status: 'draft',
               },
             });
+            await send.execute({
+              text: '',
+              presentation: {
+                version: 1,
+                type: 'facts',
+                title: 'Synthetic invoice',
+                caption: 'c'.repeat(500),
+                status: 'Pending approval',
+                items: [{ label: 'Total', value: '€10' }],
+              },
+            });
           },
         }),
         dispose() {},
@@ -4283,10 +4382,15 @@ test('send_message validates structured visuals and delivers each distinct prese
       },
     });
     assert.equal(result.status, 'succeeded');
-    assert.equal(replies.length, 1);
+    assert.equal(replies.length, 2);
     assert.equal(replies[0][3]?.type, 'draft');
     if (replies[0][3]?.type === 'draft') {
       assert.equal(replies[0][3].status, 'draft');
+    }
+    assert.equal(replies[1][3]?.type, 'facts');
+    if (replies[1][3]?.type === 'facts') {
+      assert.deepEqual(replies[1][3].status, { label: 'Pending approval', tone: 'waiting' });
+      assert.equal(replies[1][3].caption?.length, 500);
     }
   });
 
@@ -4298,6 +4402,10 @@ test('send_message validates structured visuals and delivers each distinct prese
       let releaseHold!: () => void;
       const holdGate = new Promise<void>((resolve) => {
         releaseHold = resolve;
+      });
+      let holding!: () => void;
+      const held = new Promise<void>((resolve) => {
+        holding = resolve;
       });
       const runtime = createAgentRuntime({
         agent: {
@@ -4319,7 +4427,6 @@ test('send_message validates structured visuals and delivers each distinct prese
                 },
               });
               assert.equal(input.shouldStop([{ name: 'send_message' }]), true);
-              queueMicrotask(() => queueMicrotask(releaseHold));
             },
           }),
           dispose() {},
@@ -4327,19 +4434,31 @@ test('send_message validates structured visuals and delivers each distinct prese
         computer: fakeComputer({
           act: async () => ({ url: 'https://example.com', text: 'Synthetic page' }),
           hold: async (_sessionId, keep) => {
-            if (keep) await holdGate;
+            if (!keep) return;
+            holding();
+            await holdGate;
           },
         }),
         workspace: fakeWorkspace(),
       });
       t.after(() => runtime.dispose());
-      const result = await runtime.runTurn({
-        ...context(directory),
-        turnId: randomUUID(),
-        reply: async (...args) => {
-          replies.push(args);
-        },
-      });
+      let finished = false;
+      const running = runtime
+        .runTurn({
+          ...context(directory),
+          turnId: randomUUID(),
+          reply: async (...args) => {
+            replies.push(args);
+          },
+        })
+        .finally(() => {
+          finished = true;
+        });
+      await held;
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(finished, false);
+      releaseHold();
+      const result = await running;
       assert.equal(replies.length, 1);
       assert.equal(result.status, 'waiting_user');
       assert.equal(result.message, 'Which option?');
@@ -8787,6 +8906,95 @@ test('a chat answer posts as soon as its call is written, before the rest of the
   assert.equal(writtenBeforeReply, false);
   assert.deepEqual(replies, ['There are 604,800 seconds in a week.', 'The plan is saved.']);
   assert.equal(scripts.filter((script) => script.includes('fixture-write-plan')).length, 1);
+});
+
+test('a chat answer posted before its model request fails is not sent again by a retry', async (t) => {
+  const { createServer } = await import('node:http');
+  const directory = await mkdtemp(join(tmpdir(), 'nod-pi-early-failure-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  let requests = 0;
+  const server = createServer((request, response) => {
+    request.resume();
+    request.on('end', () => {
+      requests++;
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+      response.end(
+        [
+          {
+            type: 'message_start',
+            message: {
+              id: `synthetic-early-failure-${requests}`,
+              type: 'message',
+              role: 'assistant',
+              model: 'fixture-anthropic',
+              content: [],
+              stop_reason: null,
+              stop_sequence: null,
+              usage: { input_tokens: 10, output_tokens: 0 },
+            },
+          },
+          {
+            type: 'content_block_start',
+            index: 0,
+            content_block: {
+              type: 'tool_use',
+              id: 'toolu_answer',
+              name: 'send_message',
+              input: {},
+            },
+          },
+          {
+            type: 'content_block_delta',
+            index: 0,
+            delta: {
+              type: 'input_json_delta',
+              partial_json: JSON.stringify({ text: 'There are 604,800 seconds in a week.' }),
+            },
+          },
+          { type: 'content_block_stop', index: 0 },
+          { type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } },
+        ]
+          .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+          .join(''),
+      );
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const url = 'http://127.0.0.1:' + (server.address() as import('node:net').AddressInfo).port;
+  const access = smallContextAccess('compatible', 'fixture-anthropic', 200_000);
+  access.provider = 'anthropic';
+  access.read = async () => ({ type: 'api_key', key: 'synthetic-key' });
+  access.definition.spec = {
+    ...access.definition.spec,
+    provider: 'anthropic',
+    api: 'anthropic-messages',
+    baseUrl: url,
+  };
+  const runtime = createAgentRuntime({
+    agent: createPiAgent({
+      provider: 'anthropic',
+      sessionRoot: join(directory, 'sessions'),
+      resolve: async () => access,
+    }),
+    computer: fakeComputer(),
+    workspace: fakeWorkspace(),
+  });
+  t.after(() => runtime.dispose());
+  const replies: string[] = [];
+  await runtime
+    .runTurn({
+      ...context(directory),
+      sessionId: 'fixture-early-failure',
+      turnId: randomUUID(),
+      prompt: 'How many seconds are in a week?',
+      reply: async (text) => {
+        replies.push(text);
+      },
+    })
+    .catch(() => undefined);
+  assert.equal(requests, 1);
+  assert.deepEqual(replies, ['There are 604,800 seconds in a week.']);
 });
 
 test('OpenAI cache boundaries cover shared instructions and keep task paths outside them', async () => {

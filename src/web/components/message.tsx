@@ -22,6 +22,7 @@ import { reactionEmoji } from '../../shared/emoji';
 import {
   presentationChoices,
   presentationImages,
+  presentationPick,
   presentationSchema,
   presentationText,
 } from '../../shared/presentation';
@@ -465,12 +466,19 @@ export function MessageBubble({
   const cardInRow = outsideCard && !hasBubbleText;
   const hasBubbleContent = hasBubbleText || cardInRow;
   const [error, setError] = useState('');
-  const [picked, setPicked] = useState<number | null>(null);
+  const [picked, setPicked] = useState<number[]>([]);
   const [sending, setSending] = useState(false);
+  const [gone, setGone] = useState(false);
   const pickOptions = pickQuestion?.answerChoices?.options;
+  const multiple = pickQuestion?.answerChoices?.multiple === true;
   const answeredIds = pickQuestion?.choiceAnswer?.choiceIds;
   const openChoices =
-    !pickOptions && onChoose && message.role === 'assistant' && !streaming && message.presentation
+    !pickOptions &&
+    onChoose &&
+    message.role === 'assistant' &&
+    !streaming &&
+    message.presentation &&
+    !presentationPick(message.presentation)
       ? presentationChoices(message.presentation).map((choice, index) => ({
           ...choice,
           id: String(index),
@@ -488,19 +496,26 @@ export function MessageBubble({
     : pickOptions && answeredIds
       ? pickOptions.flatMap((option, index) => (answeredIds.includes(option.id) ? [index] : []))
       : [];
-  const pickedChoice = picked === null ? undefined : pickChoices[picked];
+  const pickedChoices = picked.map((index) => pickChoices[index]!);
+  const pickedChoice = picked.length === 1 ? pickedChoices[0] : undefined;
   const cardPick: CardPick | null = pickChoices.length
     ? {
-        chosen: answered.length ? answered : picked === null ? [] : [picked],
+        chosen: answered.length ? answered : picked,
+        multiple,
         sent: answered.length > 0 || openAnswered || Boolean(pickQuestion?.choiceAnswer) || sending,
         closed:
-          !openChoices.length &&
-          !pickQuestion!.answerChoicesPending &&
-          !pickQuestion!.choiceAnswer &&
-          !sending,
+          gone ||
+          (!openChoices.length &&
+            !pickQuestion!.answerChoicesPending &&
+            !pickQuestion!.choiceAnswer &&
+            !sending),
         disabled: openChoices.length
           ? answersDisabled === true || sending || openAnswered
-          : !pickQuestion!.answerChoicesPending || !onAnswer || answersDisabled === true || sending,
+          : gone ||
+            !pickQuestion!.answerChoicesPending ||
+            !onAnswer ||
+            answersDisabled === true ||
+            sending,
         label:
           pickedChoice &&
           (pickedChoice.description &&
@@ -509,22 +524,41 @@ export function MessageBubble({
             : pickedChoice.label),
         choose(index) {
           if (sending || openAnswered) return;
-          setPicked(index);
+          setPicked((current) =>
+            !multiple
+              ? [index]
+              : current.includes(index)
+                ? current.filter((value) => value !== index)
+                : [...current, index].sort((a, b) => a - b),
+          );
           setError('');
         },
         send(written) {
-          if (sending || openAnswered) return;
-          if (!written && !pickedChoice) return;
-          const text = written || choiceAnswerText([pickedChoice!]);
+          if (sending || openAnswered || gone) return;
+          const chosen = multiple || !written ? pickedChoices : [];
+          if (!written && !chosen.length) return;
+          const text = [choiceAnswerText(chosen), written].filter(Boolean).join('\n');
+          const choiceIds = chosen.map((choice) => choice.id);
           const outcome = openChoices.length
             ? onChoose?.(text)
-            : onAnswer?.(text, written ? { custom: true } : { choiceIds: [pickedChoice!.id] });
+            : onAnswer?.(
+                text,
+                !choiceIds.length
+                  ? { custom: true }
+                  : written
+                    ? { choiceIds, custom: true }
+                    : { choiceIds },
+              );
           if (!outcome) return;
           setSending(true);
           setError('');
           void outcome.then(
             (result) => {
-              if (result === false) {
+              if (result === true && !chosen.length) setPicked([]);
+              if (result === 'unavailable') {
+                setSending(false);
+                setGone(true);
+              } else if (result === false) {
                 setSending(false);
                 setError('Your choice could not be sent. Try again.');
               }

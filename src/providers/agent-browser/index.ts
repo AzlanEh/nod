@@ -1000,7 +1000,7 @@ export function createAgentBrowserComputer(options: {
       ? end < page.length
         ? `; snapshot with offset ${end} continues`
         : ''
-      : `, links without addresses; snapshot ${end < page.length ? 'reads the whole page' : 'adds them'}`;
+      : `, links without addresses; snapshot ${end < page.length ? 'reads more of the page with them' : 'adds them'}`;
     return {
       text: `Page (${offset}-${end} of ${page.length} characters${more}):\n${page.slice(offset, end)}`,
       url: redactBrowserUrl(url, state.secrets),

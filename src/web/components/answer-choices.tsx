@@ -64,7 +64,7 @@ export function AnswerChoices({
   const { multiple, options } = choices;
   const locked = disabled || busy;
   const typed = text.trim();
-  const picked = options.filter((option) => selected.includes(option.id));
+  const picked = options.filter((option) => selected.includes(option.id) && (multiple || !typed));
   const count = picked.length + (typed ? 1 : 0);
 
   useEffect(() => {
@@ -157,19 +157,24 @@ export function AnswerChoices({
           </p>
         )}
       </div>
-      <div className="choice-card-list" role="group" aria-labelledby={`${id}-question`}>
+      <div
+        className="choice-card-list"
+        role={multiple ? 'group' : 'radiogroup'}
+        aria-labelledby={`${id}-question`}
+      >
         {options.map((option, index) => {
-          const on = selected.includes(option.id);
+          const on = picked.includes(option);
           return (
             <button
               key={option.id}
               type="button"
               className="answer-choice choice-card-row"
-              aria-pressed={on}
+              {...(multiple ? { 'aria-pressed': on } : { role: 'radio', 'aria-checked': on })}
               aria-disabled={locked}
               onClick={() => {
                 if (unavailable.current || pending.current) return;
                 setError('');
+                if (!multiple) setText('');
                 setSelected((current) =>
                   !multiple
                     ? [option.id]

@@ -118,18 +118,25 @@ function conflictingPolarity(text: string, start: string) {
 export function resemblesTaskAcknowledgement(text: string, start: string, handoff = false) {
   const trimmed = text.trim();
   const status =
-    /^(?:(?:sure|ok(?:ay)?|got it|alright|right)[,.!\s]+)?(?:on it\b|i(?:['’]ll| will)\b|i(?:['’]m| am)\s+(?:going|working|starting|looking|checking|on|pulling|gathering|digging|searching|drafting|setting)\b|i(?:['’]ve| have)\s+started\b|let me\b|looking\b|checking\b|starting\b|working\b|pulling\b|gathering\b|searching\b)/iu.test(
+    /^(?:(?:sure|ok(?:ay)?|got it|alright|right)[,.!\s]+)?(?:on it\b|i(?:['’]ll| will)\b|i(?:['’]m| am)\s+(?:going|working|starting|looking|checking|on|pulling|gathering|digging|searching|drafting|setting)\b|i(?:['’]ve| have)\s+started\b|let me\s+(?!know\b|hear\b)|looking\b|checking\b|starting\b|working\b|pulling\b|gathering\b|searching\b)/iu.test(
       trimmed,
     );
   const shortLine = trimmed.length <= 160 && !/[?\n]|https?:\/\//iu.test(trimmed);
   const hasMoney = /[€$£]/u.test(trimmed);
+  const asks =
+    /\b(?:let me know|tell me|send me|share|please|could you|can you|need (?:you|your))\b/iu.test(
+      trimmed,
+    );
+  const startNumbers = new Set(start.match(/\p{N}+/gu) ?? []);
+  const newNumbers = (trimmed.match(/\p{N}+/gu) ?? []).some((number) => !startNumbers.has(number));
   return (
     !hasMoney &&
+    !asks &&
+    !newNumbers &&
     !/\n|https?:\/\//iu.test(trimmed) &&
     !conflictingPolarity(trimmed, start) &&
     (status
-      ? (!/\p{N}/u.test(trimmed) && overlap(trimmed, start, 0.45, 0.4, 3)) ||
-        (shortLine && overlap(trimmed, start, 0.3, 0.2, 2))
+      ? overlap(trimmed, start, 0.45, 0.4, 3) || (shortLine && overlap(trimmed, start, 0.3, 0.2, 2))
       : handoff
         ? nearDuplicate(trimmed, start) || (shortLine && overlap(trimmed, start, 0.4, 0.3, 2))
         : false)

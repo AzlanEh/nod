@@ -221,6 +221,15 @@ function languageSample(row?: LanguageRow | { text: string; created_at: Date | s
     : undefined;
 }
 
+function backgroundBoundary(background?: { turnId: string; sessionId: string }) {
+  return background
+    ? `AND m.created_at <= (SELECT created_at FROM turns WHERE owner_id=$1 AND thread_id=$2 AND id=$3)
+       AND (u.id IS NULL OR u.session_id=$4
+         OR (u.status IN ('succeeded','failed','cancelled')
+             AND u.finished_at <= (SELECT created_at FROM turns WHERE owner_id=$1 AND thread_id=$2 AND id=$3)))`
+    : '';
+}
+
 export async function loadConversationLanguage(
   pool: Pick<Pool, 'query'>,
   ownerId: string,
@@ -232,12 +241,7 @@ export async function loadConversationLanguage(
     ? undefined
     : (await pool.query("SELECT to_regclass('chat_verification_submissions') AS name")).rows[0]
         ?.name;
-  const boundaryFilter = background
-    ? `AND m.created_at <= (SELECT created_at FROM turns WHERE owner_id=$1 AND thread_id=$2 AND id=$3)
-       AND (u.id IS NULL OR u.session_id=$4
-         OR (u.status IN ('succeeded','failed','cancelled')
-             AND u.finished_at <= (SELECT created_at FROM turns WHERE owner_id=$1 AND thread_id=$2 AND id=$3)))`
-    : '';
+  const boundaryFilter = backgroundBoundary(background);
   const latest = (
     await pool.query<{ owner: LanguageRow; nod: LanguageRow }>(
       `SELECT ${
@@ -287,23 +291,36 @@ export function createCommunication(options: {
     );
   }
 
-  async function languageContext(threadId: string | null) {
+  async function languageContext(threadId: string | null, turnId?: string) {
     const rememberedPreferences = ((await options.preferences?.()) ?? []).map(languageText);
     if (!threadId)
       return { userMessages: [] as Array<{ at: string; text: string }>, rememberedPreferences };
     const receipts = (
       await options.pool.query("SELECT to_regclass('chat_verification_submissions') AS name")
     ).rows[0]?.name;
+    const session = turnId
+      ? (
+          await options.pool.query<{ session_id: string }>(
+            'SELECT session_id FROM turns WHERE id=$1 AND owner_id=$2 AND thread_id=$3 AND background',
+            [turnId, options.ownerId, threadId],
+          )
+        ).rows[0]?.session_id
+      : undefined;
+    const background = turnId && session ? { turnId, sessionId: session } : undefined;
     const users = (
       await options.pool.query<{ text: string; created_at: Date }>(
         `SELECT m.text,m.created_at FROM messages m
+         LEFT JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id
          WHERE m.owner_id=$1 AND m.thread_id=$2 AND m.role='user' AND m.text<>'' AND m.approval_answer IS NULL AND NOT ${withdrawnSql('m')}
            ${receipts ? 'AND NOT EXISTS (SELECT 1 FROM chat_verification_submissions v WHERE v.message_id=m.id)' : ''}
            AND NOT EXISTS (
              SELECT 1 FROM messages offer, jsonb_array_elements(offer.suggestions->'tasks') task
              WHERE offer.owner_id=$1 AND offer.thread_id=$2 AND task->>'title'=m.text)
+           ${backgroundBoundary(background)}
          ORDER BY m.created_at DESC,m.id DESC LIMIT 30`,
-        [options.ownerId, threadId],
+        background
+          ? [options.ownerId, threadId, background.turnId, background.sessionId]
+          : [options.ownerId, threadId],
       )
     ).rows;
     const sample = await loadConversationLanguage(
@@ -311,6 +328,7 @@ export function createCommunication(options: {
       options.ownerId,
       threadId,
       users[0],
+      background,
     );
     return {
       rememberedPreferences,
@@ -346,6 +364,7 @@ export function createCommunication(options: {
     signal?: AbortSignal,
     languageMessage?: { at: string; text: string },
     channel?: string,
+    turnId?: string,
   ) {
     signal?.throwIfAborted();
     const description = privateLinks(withoutSecretKeys(data));
@@ -369,7 +388,7 @@ export function createCommunication(options: {
     };
     if (schedule) checkScheduleChannel(schedule.text);
     const hidden = withheld.length > 0 ? { withheld } : {};
-    const language = await languageContext(threadId);
+    const language = await languageContext(threadId, turnId);
     if (languageMessage?.text) {
       language.userMessages.push({ ...languageMessage, text: languageText(languageMessage.text) });
       language.userMessages.sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
@@ -503,6 +522,7 @@ export function createCommunication(options: {
         signal,
         undefined,
         proposal.channel,
+        proposal.turn.turnId,
       ).catch((error: unknown) => {
         signal?.throwIfAborted();
         if (proposal.details && 'scheduleDefinition' in proposal.details) throw error;
@@ -584,6 +604,7 @@ export function createCommunication(options: {
     threadId: string | null,
     input: ChannelPresentation | { kind: string; [key: string]: unknown },
     signal?: AbortSignal,
+    turnId?: string,
   ) {
     if (input.kind === 'confirmation')
       throw new Error('Confirmations require a saved action description.');
@@ -598,13 +619,30 @@ export function createCommunication(options: {
         data,
         signal,
         supplied.success ? supplied.data : undefined,
+        undefined,
+        turnId,
       ).then(({ text }) => text);
     }
-    return generate(threadId, input.kind, input, signal).then(({ text }) => text);
+    return generate(threadId, input.kind, input, signal, undefined, undefined, turnId).then(
+      ({ text }) => text,
+    );
   }
 
-  async function presentPayment(threadId: string | null, input: object, signal?: AbortSignal) {
-    const drafted = await generate(threadId, 'payment', input, signal);
+  async function presentPayment(
+    threadId: string | null,
+    input: object,
+    signal?: AbortSignal,
+    turnId?: string,
+  ) {
+    const drafted = await generate(
+      threadId,
+      'payment',
+      input,
+      signal,
+      undefined,
+      undefined,
+      turnId,
+    );
     if (!('action' in drafted) || typeof drafted.action !== 'string')
       throw new Error('Nod could not write a payment action.');
     return { question: drafted.text, action: drafted.action };

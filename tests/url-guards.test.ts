@@ -1,6 +1,9 @@
 import {
   flightJourneySummary,
   flightItems,
+  mapFrame,
+  mapPoint,
+  mapTileSize,
   presentationImages,
   presentationInputSchema,
   presentationSchema,
@@ -279,6 +282,75 @@ test('every redirect checks DNS again and requests use the verified address', as
   }
 });
 
+test('card pictures read only the page head, recheck the picture address and map tiles are cached', async () => {
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=',
+    'base64',
+  );
+  const calls: Array<{ url: string; metadata: boolean }> = [];
+  const provider = createPublicLinkPreviewProvider({
+    resolver: async (host) =>
+      host === 'private.example' ? [{ address: '10.0.0.2', family: 4 }] : await addresses(),
+    request: async ({ url, metadata }) => {
+      calls.push({ url: url.href, metadata });
+      if (url.pathname.endsWith('.png'))
+        return { status: 200, headers: { 'content-type': 'image/png' }, body: png };
+      return html(
+        `<meta property="og:image" content="${url.pathname === '/private' ? 'https://private.example/a.png' : '/a.png'}">`,
+      );
+    },
+  });
+  assert.equal((await provider.image!('https://example.com/page'))?.mimeType, 'image/png');
+  assert.deepEqual(calls, [
+    { url: 'https://example.com/page', metadata: true },
+    { url: 'https://example.com/a.png', metadata: false },
+  ]);
+  calls.length = 0;
+  assert.equal(await provider.image!('https://example.com/private'), null);
+  assert.deepEqual(
+    calls.map((call) => call.url),
+    ['https://example.com/private'],
+  );
+  calls.length = 0;
+  assert.ok(await provider.mapTile!(2, -1, 1));
+  assert.ok(await provider.mapTile!(2, 3, 1));
+  assert.deepEqual(
+    calls.map((call) => call.url),
+    ['https://tile.openstreetmap.org/2/3/1.png'],
+  );
+  let hang = true;
+  let waiting = 0;
+  let reached = () => {};
+  const bothWaiting = new Promise<void>((resolve) => (reached = resolve));
+  const stoppable = createPublicLinkPreviewProvider({
+    resolver: addresses,
+    request: ({ signal }) => {
+      if (!hang)
+        return Promise.resolve({
+          status: 200,
+          headers: { 'content-type': 'image/png' },
+          body: png,
+        });
+      if (++waiting === 2) reached();
+      return new Promise((_, reject) =>
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true }),
+      );
+    },
+  });
+  const stop = new AbortController();
+  const started = Date.now();
+  const stopped = stoppable.mapTile!(2, 1, 1, stop.signal);
+  const picture = stoppable.image!('https://example.com/a.png', stop.signal);
+  await bothWaiting;
+  stop.abort();
+  assert.equal(await stopped, null);
+  assert.equal(await picture, null);
+  assert.ok(Date.now() - started < 1000);
+  assert.equal(await stoppable.mapTile!(2, 1, 1, AbortSignal.abort()), null);
+  hang = false;
+  assert.ok(await stoppable.mapTile!(2, 1, 1));
+});
+
 test('pinned HTTP transport sends no cookies or authorization and stops reading at its byte limit', async () => {
   let seenHost = '';
   const server = createServer((request, reply) => {
@@ -288,8 +360,8 @@ test('pinned HTTP transport sends no cookies or authorization and stops reading 
     assert.equal(request.headers.referer, undefined);
     assert.equal(request.headers['accept-encoding'], 'identity');
     assert.ok(!request.headers.accept?.includes('image/gif'));
-    if (request.url === '/endless') {
-      reply.writeHead(200);
+    if (request.url === '/endless' || request.url === '/picture') {
+      reply.writeHead(200, request.url === '/picture' ? { 'content-type': 'image/png' } : {});
       const send = () => {
         while (!reply.destroyed && reply.write('x'.repeat(16384)));
         if (!reply.destroyed) reply.once('drain', send);
@@ -325,6 +397,16 @@ test('pinned HTTP transport sends no cookies or authorization and stops reading 
         signal: AbortSignal.timeout(2000),
         maxBytes: 1024,
         metadata: false,
+      }),
+      /too large/,
+    );
+    await assert.rejects(
+      requestPublicPreview({
+        url: new URL(`http://unresolvable.example:${port}/picture`),
+        address: '127.0.0.1',
+        signal: AbortSignal.timeout(2000),
+        maxBytes: 1024,
+        metadata: true,
       }),
       /too large/,
     );
@@ -955,6 +1037,16 @@ test('chat presentations reject unsafe URLs, executable shapes and inconsistent 
     }).success,
     false,
   );
+  const dateLine = [
+    { latitude: -16.5, longitude: 179.5 },
+    { latitude: -16.6, longitude: -179.5 },
+  ];
+  const frame = mapFrame(dateLine);
+  assert.ok(frame && frame.zoom >= 6 && frame.x >= 0 && frame.x < 2 ** frame.zoom);
+  for (const location of dateLine) {
+    const left = mapPoint(location, frame.zoom, frame.x).x / mapTileSize - frame.x;
+    assert.ok(left > 0 && left < frame.columns, String(left));
+  }
 });
 
 test('flight journeys preserve every leg and distinguish connections from technical stops', () => {

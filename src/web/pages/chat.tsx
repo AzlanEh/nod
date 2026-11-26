@@ -972,7 +972,7 @@ export function Chat({
   const questionsOnCard = new Set<string>();
   visibleMessages.forEach((question, index) => {
     const options = question.answerChoices?.options;
-    if (question.role !== 'assistant' || !options || question.answerChoices!.multiple) return;
+    if (question.role !== 'assistant' || !options) return;
     for (const card of visibleMessages.slice(Math.max(0, index - 3), index).reverse()) {
       if (card.role !== 'assistant') return;
       const pick = card.presentation && presentationPick(card.presentation);
@@ -992,6 +992,7 @@ export function Chat({
   for (const message of visibleMessages)
     if (message.role === 'user' && message.replyTo?.role === 'assistant')
       cardChoices.set(message.replyTo.id, message.text);
+  const lastOwnerIndex = visibleMessages.findLastIndex((message) => message.role === 'user');
   const fileKey = visibleMessages
     .map(
       (message) =>
@@ -2442,18 +2443,23 @@ export function Chat({
                       pickQuestion={cardQuestions.get(message.id)}
                       choicesOnCard={questionsOnCard.has(message.id)}
                       chosenText={cardChoices.get(message.id)}
-                      onChoose={async (value) => {
-                        const result = await send(value, [], {
-                          id: message.id,
-                          role: 'assistant',
-                          text: message.text,
-                        });
-                        if (!result.sent && result.error) throw new Error(result.error);
-                        return result.sent;
-                      }}
+                      onChoose={
+                        index > lastOwnerIndex || cardChoices.has(message.id)
+                          ? async (value) => {
+                              const result = await send(value, [], {
+                                id: message.id,
+                                role: 'assistant',
+                                text: message.text,
+                              });
+                              if (!result.sent && result.error) throw new Error(result.error);
+                              return result.sent;
+                            }
+                          : undefined
+                      }
                       onAnswer={async (value, answer) => {
                         const target = cardQuestions.get(message.id) ?? message;
-                        if (replyTo?.id === target.id && composer.current?.hasDraft()) {
+                        const replying = (id?: string) => id === message.id || id === target.id;
+                        if (replying(replyTo?.id) && composer.current?.hasDraft()) {
                           composer.current.focus();
                           throw new Error(
                             'Send your answer from the composer to include your edits.',
@@ -2469,12 +2475,8 @@ export function Chat({
                         );
                         if (result.questionUnavailable) return 'unavailable';
                         if (!result.sent && result.error) throw new Error(result.error);
-                        if (
-                          result.sent &&
-                          replyTo?.id === target.id &&
-                          !composer.current?.hasDraft()
-                        )
-                          setReplyTo((current) => (current?.id === target.id ? null : current));
+                        if (result.sent && replying(replyTo?.id) && !composer.current?.hasDraft())
+                          setReplyTo((current) => (replying(current?.id) ? null : current));
                         return result.sent;
                       }}
                       onApprove={

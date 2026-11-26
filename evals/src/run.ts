@@ -70,7 +70,7 @@ export interface RunOptions {
   quiet?: boolean;
 }
 
-const git = (...parts: string[]) =>
+export const git = (...parts: string[]) =>
   execFileSync('git', parts, { cwd: repository, encoding: 'utf8' }).trim();
 const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms));
 export const slug = (value: string) =>
@@ -117,6 +117,7 @@ export async function mergeRuns(options: {
   mismatch('commit', (manifest) => manifest.commit);
   mismatch('repeat', (manifest) => manifest.repeat);
   mismatch('k', (manifest) => manifest.k);
+  mismatch('shard count', (manifest) => manifest.shard?.total ?? 0);
   const seen = new Set<string>();
   const attempts: AttemptResult[] = [];
   for (const run of runs) {
@@ -128,17 +129,32 @@ export async function mergeRuns(options: {
     }
   }
   attempts.sort((a, b) => a.scenario.localeCompare(b.scenario) || a.attempt - b.attempt);
-  const scenarioIds = [...new Set(runs.flatMap((run) => run.manifest.scenarioIds ?? []))].sort();
+  const scenarioIds = [
+    ...new Set(
+      runs.flatMap((run) => run.manifest.shard?.scenarioIds ?? run.manifest.scenarioIds ?? []),
+    ),
+  ].sort();
+  const present = new Set(runs.map((run) => run.manifest.shard?.index));
+  const absentShards = Array.from({ length: first.shard?.total ?? 0 }, (_, i) => i + 1).filter(
+    (index) => !present.has(index),
+  );
   const startedAt = runs.map((run) => run.manifest.startedAt).sort()[0];
   const manifest: RunManifest = {
     ...first,
+    shard: undefined,
     label,
     startedAt,
     dirty: runs.some((run) => run.manifest.dirty),
     scenarioIds,
     provenance: {
-      ...first.provenance,
+      ...Object.fromEntries(
+        Object.keys(first.provenance).map((key) => [
+          key,
+          [...new Set(runs.map((run) => run.manifest.provenance[key]))].join(','),
+        ]),
+      ),
       mergedFrom: labels.join(','),
+      ...(absentShards.length ? { missingShards: absentShards.join(',') } : {}),
     },
   };
   const summary = summarize(manifest, attempts);
@@ -354,28 +370,29 @@ export async function runSuite(options: RunOptions) {
   parseModel(judge, environment);
   const k = options.k ?? options.repeat;
   if (k > options.repeat) throw new Error('--k cannot exceed --repeat.');
-  const selected = select(options);
+  const planned = select({ ...options, shard: undefined });
+  const selected = sliceShard(planned, options.shard);
   const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-');
   const label = options.label ?? `${slug(model.split('/').pop()!)}-${stamp}`;
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/.test(label))
     throw new Error('Labels must be simple file names.');
   const directory = join(options.root, label);
   const existing = await readdir(join(directory, 'attempts')).catch(() => [] as string[]);
+  let effort = options.effort;
   if (existing.length && !options.resume)
     throw new Error(`Run ${label} already exists. Choose another --label or pass --resume.`);
   if (existing.length) {
     const saved = JSON.parse(
       await readFile(join(directory, 'manifest.json'), 'utf8'),
     ) as Partial<RunManifest>;
-    const wanted = {
-      model,
-      backgroundModel: options.backgroundModel,
-      effort: options.effort ?? 'high',
-      judge,
-    };
-    const changed = (Object.keys(wanted) as Array<keyof typeof wanted>).filter(
-      (key) => (saved[key] ?? (key === 'effort' ? 'high' : undefined)) !== wanted[key],
+    const wanted = { model, backgroundModel: options.backgroundModel, judge };
+    const changed: string[] = (Object.keys(wanted) as Array<keyof typeof wanted>).filter(
+      (key) => saved[key] !== wanted[key],
     );
+    if (effort && effort !== (saved.effort ?? 'high')) changed.push('effort');
+    effort ??= saved.effort;
+    const shard = (value?: Shard) => (value ? `${value.index}/${value.total}` : '');
+    if (shard(saved.shard) !== shard(options.shard)) changed.push('shard');
     if (changed.length)
       throw new Error(
         `Run ${label} was saved with a different ${changed.join(', ')}. Resume it with the same options or choose another --label.`,
@@ -410,10 +427,13 @@ export async function runSuite(options: RunOptions) {
       ...(options.ref ? { ref: options.ref } : {}),
       model,
       ...(options.backgroundModel ? { backgroundModel: options.backgroundModel } : {}),
-      effort: options.effort ?? 'high',
+      ...(effort ? { effort } : {}),
       judge,
       repeat: options.repeat,
       scenarioIds: selected.map((item) => item.id),
+      ...(options.shard
+        ? { shard: { ...options.shard, scenarioIds: planned.map((item) => item.id) } }
+        : {}),
       k,
       provenance: {
         workspaceImage: await digest(environment.NOD_EVAL_WORKSPACE_IMAGE!),
@@ -478,7 +498,7 @@ export async function runSuite(options: RunOptions) {
             directory,
             model,
             ...(options.backgroundModel ? { backgroundModel: options.backgroundModel } : {}),
-            effort: options.effort ?? 'high',
+            effort,
             judge,
             source: refSource,
             task,
@@ -501,6 +521,10 @@ export async function runSuite(options: RunOptions) {
             result = undefined;
             await sleep(Math.min(30_000 * 3 ** tries, 90_000));
           } else accounting.add(result);
+        }
+        if (!manifest.effort && result?.effort) {
+          manifest.effort = result.effort;
+          await saveRun(directory, manifest, []);
         }
         if (discarded.length && attempted) {
           result = mergeAttemptCosts([...discarded, ...(result ? [result] : [])]);

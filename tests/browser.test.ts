@@ -6270,6 +6270,7 @@ describe('interface components', { concurrency: interfaceLanes }, () => {
       assert.equal(selected().at(-1).properties.selected_count, 1);
       await mount('typed');
       assert.equal(document.querySelector('.answer-choices-done').getAttribute('aria-disabled'), 'true');
+      await click('.answer-choice');
       await type(' PRIVATE_TYPED ');
       await click('.answer-choices-done');
       assert.deepEqual(pending.at(-1).selection, { custom: true });

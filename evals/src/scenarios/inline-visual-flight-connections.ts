@@ -27,7 +27,7 @@ const definition = inlineVisualScenario({
 <p>Option B has a 3-hour overnight connection at AMS on one ticket, no airport change and no self-transfer. Total scheduled journey: 7h30. The source provides no minimum connection-time or immigration assessment. Search results are not guaranteed or booked.</p>`;
   },
   criterion:
-    'Preserve both options in native flight presentations and in a useful text comparison. Option A costs €260 for flights, has AV101 LIS–CDG, AV501 CDG–FRA operated by Alpine Regional with a 45-minute ZRH technical stop on the same aircraft, then CB210 HHN–PRG. It has two connections, not three; the technical stop remains inside AV501. Preserve the overnight 2h30 CDG connection and the 4-hour FRA-to-HHN airport change/self-transfer with separate final ticket. Ground transfer cost and connection feasibility are unknown; do not claim the whole trip is within €350, protected, safe or booked. Option B is €340, CA220 LIS–AMS then CA330 AMS–PRG, 3-hour overnight same-airport connection, one ticket and no self-transfer; recommend it as matching the stated preferences, without inventing a minimum-connection-time or visa check. Both arrive before noon the next day and include a cabin bag but no checked bag. Preserve the source dates, local times, time zones, operating carrier and distinct equipment per segment. A single route summary, prose-only hidden connections, or one shared aircraft for all legs fails. Do not invent terminals, availability, guaranteed fares or reservations.',
+    'Preserve both options as item cards whose journey timeline lists every flight as its own leg, and in a useful text comparison. Option A costs €260 for flights, has AV101 LIS–CDG, AV501 CDG–FRA operated by Alpine Regional with a 45-minute ZRH technical stop on the same aircraft, then CB210 HHN–PRG. It has two connections, not three; the technical stop remains inside AV501. Preserve the overnight 2h30 CDG connection and the 4-hour FRA-to-HHN airport change/self-transfer with separate final ticket. Ground transfer cost and connection feasibility are unknown; do not claim the whole trip is within €350, protected, safe or booked. Option B is €340, CA220 LIS–AMS then CA330 AMS–PRG, 3-hour overnight same-airport connection, one ticket and no self-transfer; recommend it as matching the stated preferences, without inventing a minimum-connection-time or visa check. Both arrive before noon the next day and include a cabin bag but no checked bag. Preserve the source dates, local times, time zones, operating carrier and distinct equipment per segment. A single route summary, prose-only hidden connections, or one shared aircraft for all legs fails. Do not invent terminals, availability, guaranteed fares or reservations.',
 });
 
 export default {
@@ -41,22 +41,28 @@ export default {
           const visuals = presentations(run).filter((value) => value.type === 'items') as Array<
             Extract<Presentation, { type: 'items' }>
           >;
-          const items = visuals.flatMap((value) => value.items);
-          const optionA = items.find((item) => {
-            const text = JSON.stringify(item).toUpperCase();
-            return text.includes('AV101') && text.includes('AV501') && text.includes('CB210');
-          });
-          const text = JSON.stringify(optionA ?? {});
+          const journeys = visuals.flatMap((value) =>
+            value.items.flatMap((item) => item.journeys ?? []),
+          );
+          const journey = journeys.find(
+            (value) =>
+              value.legs.length === 3 &&
+              value.legs
+                .map((leg) => leg.name.match(/\b[A-Z]{2}\s*\d+\b/i)?.[0].replace(/\s+/g, ''))
+                .join('|')
+                .toUpperCase() === 'AV101|AV501|CB210',
+          );
+          const [first, middle, last] = journey?.legs ?? [];
           return {
             pass: Boolean(
-              optionA?.route &&
-              /\bZRH\b/i.test(text) &&
-              /\bFRA\b/i.test(text) &&
-              /\bHHN\b/i.test(text) &&
-              optionA.warning &&
-              /airport|transfer|separate/i.test(optionA.warning),
+              first &&
+              !/airport change|self[- ]?transfer/i.test(first.after ?? '') &&
+              /\bZRH\b/i.test(`${middle?.detail ?? ''} ${middle?.to.note ?? ''}`) &&
+              /\bFRA\b/i.test(middle?.to.place ?? '') &&
+              /airport|self[- ]?transfer|separate/i.test(middle?.after ?? '') &&
+              /\bHHN\b/i.test(last?.from.place ?? ''),
             ),
-            evidence: JSON.stringify(optionA ?? { items: items.length }),
+            evidence: JSON.stringify(journey ?? { journeys: journeys.length }),
           };
         },
         { failure: 'reasoning' },

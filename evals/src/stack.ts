@@ -124,6 +124,7 @@ export interface Stack {
   event(summary: string, sources?: string[]): Promise<string>;
   stop(): Promise<void>;
   finalUsage?: Run['usage'];
+  effort?: ModelEffort;
 }
 
 export function createStackRequest(baseUrl: string, cookie: string): Stack['request'] {
@@ -390,14 +391,17 @@ export async function startStack(options: {
       },
     });
     await models.initialize();
-    if (model.effort) {
-      const current = models.view().selection;
-      if (current && current.effort !== model.effort) {
-        const connection = models.view().connections.find((row) => row.id === current.connectionId);
-        const choice = connection?.models.find((item) => item.id === current.modelId);
-        if (choice?.efforts.includes(model.effort))
-          await models.select({ ...current, effort: model.effort });
-      }
+    const current = models.view().selection;
+    const effort = model.effort ?? 'high';
+    if (current && current.effort !== effort) {
+      const connection = models.view().connections.find((row) => row.id === current.connectionId);
+      const choice = connection?.models.find((item) => item.id === current.modelId);
+      if (choice?.efforts.length && !choice.efforts.includes(effort)) {
+        if (model.effort)
+          throw new Error(
+            `${model.name} does not support --effort ${model.effort}. Use one of: ${choice.efforts.join(', ')}.`,
+          );
+      } else if (choice?.efforts.length) await models.select({ ...current, effort });
     }
     if (options.backgroundModel) {
       if (!('setRoute' in models))
@@ -553,6 +557,7 @@ export async function startStack(options: {
       get finalUsage() {
         return finalUsage;
       },
+      effort: models.view().selection?.effort,
       proactivity: {
         view: () => engine.view(),
         control: (input) => engine.control(input),

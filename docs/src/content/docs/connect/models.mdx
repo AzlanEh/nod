@@ -271,7 +271,7 @@ Nod uses your model when you talk to it, in the app, Telegram and WhatsApp, and 
 
 A lighter model costs much less, but in Nod's evals it read less and flagged fewer time-sensitive things for you than your main model.
 
-Subagents, the helpers Nod hands part of a turn to, use the light model in every kind of work, including chat, with lighter reasoning, so they finish faster. Without a light model they use the turn's model.
+Subagents, the helpers Nod hands part of a turn to, use the light model in every kind of work, including chat, so they finish faster. Without a light model they use the turn's model. Subagents and task turns use lighter reasoning: low, else medium, else minimal, and never more than the model's own setting. Work you gave a model of its own, a task or schedule with its own model or work set to a connected model after **Schedules use** or **Work Nod starts on its own uses**, keeps that model and its effort for its turns and subagents.
 
 A schedule or task can have its own model too: in **Scheduled**, select the model on a schedule's row, or open a task and select **Change** beside **Model**. **Settings > Models** lists the ones that differ from their default. When that work has priced usage in the last 30 days, each list shows what it cost, repriced on each model; otherwise it shows each model's token prices. Different models use different numbers of tokens for the same work, so the price is an estimate.
 
@@ -313,11 +313,11 @@ Nod can use a decision model to check action permission, read confirmation repli
 
 Set `NOD_TRUST_MODEL` in the server configuration, then [apply the change](/deploy/configuration/#how-settings-work).
 
-| Value      | Action permission, strict app reads, and confirmation replies             |
-| ---------- | ------------------------------------------------------------------------- |
-| `selected` | Your selected model at its lowest reasoning setting. This is the default. |
-| `llm`      | A small LLM.                                                              |
-| `decision` | The first available decision model, or a small LLM.                       |
+| Value      | Action permission, strict app reads, and confirmation replies                                           |
+| ---------- | ------------------------------------------------------------------------------------------------------- |
+| `selected` | Your selected model at medium reasoning, or its first effort level without medium. This is the default. |
+| `llm`      | A small LLM.                                                                                            |
+| `decision` | The first available decision model, or a small LLM.                                                     |
 
 For an audio model, `selected` uses the same-connection text companion shown under **Text support**. The small LLM comes from your selected connection when it offers a known small model. Otherwise, Nod chooses a known small model from another connected service. It chooses before making a request. If no small model is available, the check cannot authorize an action. It never replaces the small checker with your larger chat model.
 

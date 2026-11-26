@@ -18,6 +18,7 @@ import type {
   AgentTool,
   AgentToolOutcome,
   AgentToolResult,
+  BrowserConnectionRequest,
   BrowserStep,
   Documentation,
   ModelFailure,
@@ -355,11 +356,15 @@ export function createAgentRuntime(dependencies: {
         .replace(/<\/?(?:invoke|parameter|function_calls|antml:[a-z_]+)\b[^>]*>/gi, '')
         .replace(/[\u200b\ufeff]+$/g, '')
         .trim();
-    const words = (text: string) => new Set(text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []);
+    const words = (text: string) => new Set(text.match(/[\p{L}\p{N}]+/gu) ?? []);
     const restates = (text: string, earlier: string) => {
       if (text === earlier) return true;
       if (!earlier) return false;
-      const [a, b] = [words(text), words(earlier)];
+      const known = words(earlier);
+      const added = [...words(text)].filter((word) => !known.has(word));
+      if (added.some((word) => /^\p{Lu}|\p{N}/u.test(word))) return false;
+      const lower = (set: Set<string>) => new Set([...set].map((word) => word.toLowerCase()));
+      const [a, b] = [lower(words(text)), lower(known)];
       if (Math.min(a.size, b.size) < 12) return false;
       let shared = 0;
       for (const word of a) if (b.has(word)) shared++;
@@ -703,9 +708,17 @@ export function createAgentRuntime(dependencies: {
                 },
               ),
             );
+          const notice =
+            output === confirmationNotice ||
+            (name === 'browser' &&
+              (params as { action?: unknown })?.action === 'steps' &&
+              typeof output === 'object' &&
+              output !== null &&
+              Object.keys(output).join() === 'steps,stopped,result' &&
+              (output as { result?: unknown }).result === confirmationNotice);
           if (
             !nested &&
-            output !== confirmationNotice &&
+            !notice &&
             (delimitedTools.has(name) || name.startsWith('mcp__') || catalogResult)
           )
             result = delimit(
@@ -720,7 +733,7 @@ export function createAgentRuntime(dependencies: {
                 ? context.timeZone
                 : undefined,
             );
-          else if (!nested && output !== confirmationNotice) {
+          else if (!nested && !notice) {
             const times = localResultTimes(
               result.content.flatMap((part) => (part.type === 'text' ? [part.text] : [])),
               context.timeZone,
@@ -987,9 +1000,29 @@ export function createAgentRuntime(dependencies: {
           ),
         ownerContext: compactOwnerContext(context),
       };
+      const ownerGate = () =>
+        admissions.getStore()?.admit ??
+        (async (asks: boolean) => {
+          if (!asks) return;
+          answerFirst();
+          await readFirst();
+        });
       const shared = {
         context: {
           ...context,
+          requestCredential: (input: Parameters<RuntimeContext['requestCredential']>[0]) =>
+            context.requestCredential(input, ownerGate()),
+          ...(context.requestPayment
+            ? {
+                requestPayment: (input: unknown) => context.requestPayment!(input, ownerGate()),
+              }
+            : {}),
+          ...(context.browserConnection
+            ? {
+                browserConnection: (request: BrowserConnectionRequest) =>
+                  context.browserConnection!(request, ownerGate()),
+              }
+            : {}),
           integration: (
             action: string,
             args: Record<string, unknown>,
@@ -1019,16 +1052,7 @@ export function createAgentRuntime(dependencies: {
           },
           ...(context.browserStep
             ? {
-                browserStep: (request: BrowserStep) =>
-                  context.browserStep!(
-                    request,
-                    admissions.getStore()?.admit ??
-                      (async (asks: boolean) => {
-                        if (!asks) return;
-                        answerFirst();
-                        await readFirst();
-                      }),
-                  ),
+                browserStep: (request: BrowserStep) => context.browserStep!(request, ownerGate()),
               }
             : {}),
         },
@@ -1091,7 +1115,11 @@ export function createAgentRuntime(dependencies: {
         let completed = false;
         const childProgress = toolProgress();
         let childSteps = 0;
+        let capped = false;
         const maxChildSteps = 6;
+        const spent = () =>
+          Promise.reject(new Error('No tool steps are left. Answer now with what you found.'));
+        const childTool = sandboxTool(source, childPath);
         const childTimeoutMs = 45_000;
         let childTimedOut = false;
         const childTimer = setTimeout(() => {
@@ -1109,7 +1137,7 @@ export function createAgentRuntime(dependencies: {
             ...((context.delegateModel ?? context.model)
               ? { model: context.delegateModel ?? context.model }
               : {}),
-            lighterEffort: true,
+            ...(context.modelChosen ? {} : { lighterEffort: true }),
             automatic: Boolean(context.automatic),
             ephemeral: true,
             systemPrompt: system,
@@ -1117,15 +1145,21 @@ export function createAgentRuntime(dependencies: {
             compactInstructions,
             tools: bind({ ...shared, execution: source }, async () => {
               browsed = true;
-            }).filter((tool) => !parentTools.has(tool.name)),
+            })
+              .filter((tool) => !parentTools.has(tool.name))
+              .map((tool) => ({
+                ...tool,
+                execute: (params, options) => (capped ? spent() : tool.execute(params, options)),
+              })),
             workspace: { ...workspace, path: childPath },
             timeZone: context.timeZone,
-            runTool: sandboxTool(source, childPath),
-            shouldStop: (results) =>
-              stopped ||
-              overBudget() ||
-              childProgress.stopped(results) ||
-              ++childSteps >= maxChildSteps,
+            runTool: (name, params, run, options) =>
+              capped ? spent() : childTool(name, params, run, options),
+            shouldStop: (results) => {
+              if (stopped || overBudget() || childProgress.stopped(results) || capped) return true;
+              capped = ++childSteps >= maxChildSteps;
+              return false;
+            },
             onEvent: (event) => {
               countUsage(event);
               if (event.type === 'final') answer = event.text;
@@ -1278,7 +1312,7 @@ export function createAgentRuntime(dependencies: {
       const opening = agent.open({
         ...execution,
         ...(context.model ? { model: context.model } : {}),
-        ...(context.taskContext ? { lighterEffort: true } : {}),
+        ...(context.taskContext && !context.modelChosen ? { lighterEffort: true } : {}),
         automatic: Boolean(context.automatic),
         contextRestart: context.contextRestart,
         ...(context.proactivity ? { restricted: true } : {}),
@@ -1296,13 +1330,11 @@ export function createAgentRuntime(dependencies: {
         timeZone: context.timeZone,
         runTool: sandboxTool(execution, workspace.path),
         shouldStop: (results) => {
-          if (deferredPause) {
+          if (deferredPause && !results?.some((result) => result.error !== undefined)) {
             const pending = deferredPause;
             deferredPause = undefined;
-            if (!results?.some((result) => result.error !== undefined)) {
-              pausePromise = commitPause(pending.reason, pending.message, pending.choices);
-              return true;
-            }
+            pausePromise = commitPause(pending.reason, pending.message, pending.choices);
+            return true;
           }
           if (stopped || finalDelivered) return true;
           if (progress.stopped(results)) return true;
@@ -1401,6 +1433,7 @@ export function createAgentRuntime(dependencies: {
             flushText();
             const handsOff =
               !context.taskContext &&
+              !owed.length &&
               (event.beforeTool === 'task' || (event.beforeTool === 'skills' && !spoke));
             const text = streamSubmitted || stopped || handsOff ? '' : streamedText.trim();
             if (

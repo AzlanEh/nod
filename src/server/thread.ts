@@ -102,15 +102,17 @@ export const boss = new PgBoss({
 });
 async function cardPictures(
   presentation: Presentation | undefined,
-  fetchImage: ((url: string) => Promise<PreviewImage | null>) | undefined,
+  fetchImage: ((url: string, signal: AbortSignal) => Promise<PreviewImage | null>) | undefined,
+  signal: AbortSignal,
 ): Promise<Array<PreviewImage | null>> {
   if (!fetchImage) return [];
   const wanted = pictureSlots(presentation);
   if (!wanted.some(Boolean)) return [];
   const deadline = new Promise<null>((resolve) => setTimeout(resolve, 5000, null).unref());
+  const stop = AbortSignal.any([signal, AbortSignal.timeout(5000)]);
   const fetched = await Promise.all(
     wanted.map((want) =>
-      want ? Promise.race([fetchImage(want.url).catch(() => null), deadline]) : null,
+      want ? Promise.race([fetchImage(want.url, stop).catch(() => null), deadline]) : null,
     ),
   );
   const keys = fetched.map((picture) =>
@@ -124,7 +126,10 @@ async function cardPictures(
 
 async function cardMap(
   presentation: Presentation | undefined,
-  fetchTile: ((zoom: number, x: number, y: number) => Promise<PreviewImage | null>) | undefined,
+  fetchTile:
+    | ((zoom: number, x: number, y: number, signal: AbortSignal) => Promise<PreviewImage | null>)
+    | undefined,
+  signal: AbortSignal,
 ) {
   if (presentation?.type !== 'items' || !fetchTile || presentation.items.length < 2) return null;
   const locations = presentation.items.map((item) => item.location);
@@ -132,6 +137,7 @@ async function cardMap(
   const frame = mapFrame(locations as Array<NonNullable<(typeof locations)[number]>>);
   if (!frame) return null;
   const deadline = new Promise<null>((resolve) => setTimeout(resolve, 5000, null).unref());
+  const stop = AbortSignal.any([signal, AbortSignal.timeout(5000)]);
   const tiles = await Promise.all(
     Array.from({ length: frame.columns * frame.rows }, (_, index) =>
       Promise.race([
@@ -139,6 +145,7 @@ async function cardMap(
           frame.zoom,
           frame.x + (index % frame.columns),
           frame.y + Math.floor(index / frame.columns),
+          stop,
         ).catch(() => null),
         deadline,
       ]),
@@ -149,7 +156,7 @@ async function cardMap(
 
 const running = new Map<string, AbortController>();
 const inflight = new Set<Promise<void>>();
-const quickReplying = new Set<string>();
+const quickChecked = new Set<string>();
 let stopping = false;
 let nextStop = new AbortController();
 let chatStop = new AbortController();
@@ -269,8 +276,13 @@ export interface ThreadDependencies {
     signal?: AbortSignal,
   ) => Promise<void>;
   readArtifact?: (threadId: string, path: string, maxBytes: number) => Promise<Uint8Array>;
-  cardImage?: (url: string) => Promise<PreviewImage | null>;
-  mapTile?: (zoom: number, x: number, y: number) => Promise<PreviewImage | null>;
+  cardImage?: (url: string, signal: AbortSignal) => Promise<PreviewImage | null>;
+  mapTile?: (
+    zoom: number,
+    x: number,
+    y: number,
+    signal: AbortSignal,
+  ) => Promise<PreviewImage | null>;
   mailCheck?: MailCheck;
   executeConfirmation?: (
     turnId: string,
@@ -320,11 +332,13 @@ export interface ThreadDependencies {
   requestCredential: (
     turn: TurnRef,
     input: Parameters<RuntimeContext['requestCredential']>[0],
+    admit?: (asks: boolean, read?: boolean) => Promise<void>,
   ) => ReturnType<RuntimeContext['requestCredential']>;
   requestPayment?: (
     turn: TurnRef,
     input: unknown,
     show: (image: Uint8Array) => Promise<void>,
+    admit?: (asks: boolean, read?: boolean) => Promise<void>,
   ) => ReturnType<NonNullable<RuntimeContext['requestPayment']>>;
   integration: (
     turn: TurnRef,
@@ -1936,55 +1950,60 @@ async function quickReplies(
      ORDER BY q.created_at,q.id`,
     [ownerId, threadId],
   );
+  const queued = new Set(rows.map((row) => row.id));
+  for (const id of quickChecked) if (!queued.has(id)) quickChecked.delete(id);
   await Promise.all(
     rows.map(async (row) => {
-      if (quickReplying.has(row.id)) return;
-      quickReplying.add(row.id);
-      try {
-        const stop = running.get(row.running_id)?.signal;
-        if (!stop || stop.aborted) return;
-        const text = (
-          await write(
-            row.running_id,
-            await quickReplyInput(threadId, row),
-            AbortSignal.any([stop, AbortSignal.timeout(15_000)]),
-          )
-        ).trim();
-        if (!text || stop.aborted) return;
-        const streamId = `quick:${row.message_id}`;
-        const posted = await withTurnLock(
-          { turnId: row.running_id, signal: stop },
-          async (client) => {
-            await lockThread(client);
-            const open = await client.query(
-              `SELECT 1 FROM turns q
-               WHERE q.id=$1 AND q.owner_id=$2 AND q.status='queued'
-                 AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.owner_id=q.owner_id AND m.stream_id=$3)`,
-              [row.id, ownerId, streamId],
-            );
-            if (!open.rowCount) return false;
-            await insertAssistantMessage(
-              client,
-              { threadId, turnId: row.running_id },
-              text,
-              [],
-              streamId,
-              null,
-            );
-            return true;
-          },
-        ).catch((error) => {
-          if (
-            stop.aborted ||
-            (error instanceof Error && error.message === 'This turn is no longer active.')
-          )
-            return false;
-          throw error;
-        });
-        if (posted) refresh();
-      } finally {
-        quickReplying.delete(row.id);
-      }
+      if (quickChecked.has(row.id)) return;
+      quickChecked.add(row.id);
+      const stop = running.get(row.running_id)?.signal;
+      if (!stop || stop.aborted) return;
+      const text = (
+        await write(
+          row.running_id,
+          await quickReplyInput(threadId, row),
+          AbortSignal.any([stop, AbortSignal.timeout(15_000)]),
+        )
+      ).trim();
+      if (!text || stop.aborted) return;
+      const streamId = `quick:${row.message_id}`;
+      const posted = await transaction(
+        async (database) => {
+          await lockThread(database);
+          return withTurnLock(
+            { turnId: row.running_id, signal: stop },
+            async (client) => {
+              const open = await client.query(
+                `SELECT 1 FROM turns q
+                   WHERE q.id=$1 AND q.owner_id=$2 AND q.status='queued'
+                     AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.owner_id=q.owner_id AND m.stream_id=$3)`,
+                [row.id, ownerId, streamId],
+              );
+              if (!open.rowCount) return false;
+              await insertAssistantMessage(
+                client,
+                { threadId, turnId: row.running_id },
+                text,
+                [],
+                streamId,
+                null,
+              );
+              return true;
+            },
+            database,
+          );
+        },
+        pool,
+        stop,
+      ).catch((error) => {
+        if (
+          stop.aborted ||
+          (error instanceof Error && error.message === 'This turn is no longer active.')
+        )
+          return false;
+        throw error;
+      });
+      if (posted) refresh();
     }),
   );
 }
@@ -2027,7 +2046,8 @@ async function quickReplyInput(
   return {
     message: message.rows[0]?.text ?? '',
     conversation: conversation.rows,
-    working: now ? `${row.running_prompt}\nNow: ${now}` : row.running_prompt,
+    working: row.running_prompt,
+    ...(now ? { step: now } : {}),
     tasks: tasks.rows.map(({ title, state, now }) => ({
       title,
       state,
@@ -2388,30 +2408,17 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
   const published = new Map<string, Artifact>();
   let sourceMessageId: string | null = null;
   const ownerMessageIds: string[] = [];
-  const ownerRequest = async (request: unknown, start: boolean) => {
+  const burst: string[] = [];
+  const merged = (id: string) => (burst.includes(id) ? burst.at(-1)! : id);
+  const ownerRequest = (request: unknown) => {
     if (request !== undefined) {
-      if (typeof request === 'string' && ownerMessageIds.includes(request)) return request;
-      const earlier =
-        start &&
-        typeof request === 'string' &&
-        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(request) &&
-        (
-          await pool.query(
-            `SELECT 1 FROM messages m JOIN threads th ON th.id=m.thread_id AND th.owner_id=m.owner_id
-             WHERE m.id=$1 AND m.owner_id=$2 AND m.thread_id=$3 AND m.role='user' AND m.hidden_at IS NULL
-               AND m.created_at>COALESCE(th.chat_restarted_at,'-infinity')`,
-            [request, ownerId, threadId],
-          )
-        ).rowCount;
-      if (!earlier)
+      if (typeof request !== 'string' || !ownerMessageIds.includes(request))
         throw new Error(
-          start
-            ? 'request must be the messageId of an owner message in this chat, such as currentMessageId or one sent while you worked.'
-            : 'request must be currentMessageId or the messageId of an owner message sent while you worked.',
+          'request must be currentMessageId or the messageId of an owner message sent while you worked.',
         );
-      return request as string;
+      return merged(request);
     }
-    if (ownerMessageIds.length > 1)
+    if (new Set(ownerMessageIds.map(merged)).size > 1)
       throw new Error(
         'The owner sent several messages during this turn. Set request to the messageId of the one this work serves.',
       );
@@ -2438,8 +2445,8 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
     const cleanup: Array<() => Promise<void>> = [];
     let rolledBack = false;
     const [pictures, map] = await Promise.all([
-      cardPictures(presentation, dependencies.cardImage),
-      cardMap(presentation, dependencies.mapTile),
+      cardPictures(presentation, dependencies.cardImage, signal),
+      cardMap(presentation, dependencies.mapTile, signal),
     ]);
     try {
       const id = await current(async (client) => {
@@ -2615,7 +2622,10 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
     const loaded = await loadTurnContext(turn, dependencies);
     const proactivity = await dependencies.proactivity?.(ref, signal);
     sourceMessageId = loaded.sourceMessageId;
-    if (sourceMessageId) ownerMessageIds.push(sourceMessageId);
+    if (sourceMessageId) {
+      ownerMessageIds.push(sourceMessageId);
+      burst.push(sourceMessageId);
+    }
     let initialPrompt = String(turn.prompt ?? '');
     if (
       burstCoalesceMs > 0 &&
@@ -2627,6 +2637,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
       if (extra.length) {
         sourceMessageId = extra.at(-1)!.id;
         ownerMessageIds.push(...extra.map((message) => message.id));
+        if (burst.length) burst.push(...extra.map((message) => message.id));
         const parts = [{ text: initialPrompt, audioCaption: loaded.audioCaption }];
         for (const message of extra) {
           const loadedExtra = await loadMessage(message.id);
@@ -2799,7 +2810,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
       tasks,
       ...(checkIn ? { checkIn } : {}),
       ...(limit ? { spendingLimitReached: { monthlyUsd: limit.monthlyUsd } } : {}),
-      currentMessageId: loaded.sourceMessageId ?? undefined,
+      currentMessageId: burst.at(-1),
       automatic:
         !loaded.sourceMessageId &&
         (turn.source !== 'resume' || String(turn.source_id).startsWith('task-check:')),
@@ -2853,7 +2864,9 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
         fenced((action, service, proposal, newAccount, query, connectionId) =>
           connections(action, service, ref, proposal, newAccount, query, connectionId),
         ),
-      requestCredential: fenced((input) => dependencies.requestCredential(ref, input)),
+      requestCredential: fenced((input, admit) =>
+        dependencies.requestCredential(ref, input, admit),
+      ),
       browserStep: fenced(
         (request: BrowserStep, admit?: (asks: boolean, read?: boolean) => Promise<void>) =>
           dependencies.browserStep(
@@ -2876,11 +2889,24 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
       ),
       ...(dependencies.requestPayment
         ? {
-            requestPayment: fenced((input: unknown) =>
-              dependencies.requestPayment!(ref, input, async (image) => {
-                if (turn.channel === 'web')
-                  await attach(image, 'checkout.jpg', 'image/jpeg', '', true, 'browser_screenshot');
-              }),
+            requestPayment: fenced(
+              (input: unknown, admit?: (asks: boolean, read?: boolean) => Promise<void>) =>
+                dependencies.requestPayment!(
+                  ref,
+                  input,
+                  async (image) => {
+                    if (turn.channel === 'web')
+                      await attach(
+                        image,
+                        'checkout.jpg',
+                        'image/jpeg',
+                        '',
+                        true,
+                        'browser_screenshot',
+                      );
+                  },
+                  admit,
+                ),
             ),
           }
         : {}),
@@ -2911,17 +2937,23 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
             request?: unknown;
             action?: unknown;
             message?: string;
+            now?: string;
+            title?: string;
           };
           const bound =
             input.action === 'start' || input.action === 'reply'
-              ? await ownerRequest(request, input.action === 'start')
+              ? ownerRequest(request)
               : sourceMessageId;
           const prior =
             input.action === 'start' && bound
               ? plainReplies.findLast(
                   (reply) =>
                     reply.sourceMessageId === bound &&
-                    resemblesTaskAcknowledgement(reply.text, input.message ?? '', reply.handoff),
+                    resemblesTaskAcknowledgement(
+                      reply.text,
+                      String(input.message ?? input.now ?? input.title ?? ''),
+                      reply.handoff,
+                    ),
                 )
               : undefined;
           return dependencies.task!(ref, input, bound, prior?.id, prior?.handoff);
@@ -2979,7 +3011,9 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
       hasQueuedMessages:
         turn.background && !taskContext
           ? undefined
-          : () => hasQueuedMessages(turn.session_id, turn.channel),
+          : async () =>
+              !(await Promise.resolve(dependencies.spendingLimit?.()).catch(() => true)) &&
+              hasQueuedMessages(turn.session_id, turn.channel),
       createAudio: async (text) => {
         explicitAudio = true;
         const audio = await fenced(() => dependencies.speech.synthesize(text, signal))();

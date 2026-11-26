@@ -116,6 +116,7 @@ export interface RuntimeContext {
   background?: boolean;
   scheduleCache?: 'short' | 'long';
   model?: ModelSelection;
+  modelChosen?: boolean;
   delegateModel?: ModelSelection;
   channel?: string;
   runtimeHost?: 'desktop' | 'server';
@@ -253,8 +254,12 @@ export interface RuntimeContext {
           methods: { label: string; selector: string }[];
         }
     ),
+    admit?: (asks: boolean, read?: boolean) => Promise<void>,
   ): Promise<{ url: string } | { filled: true } | { [appConfirmation]: string }>;
-  requestPayment?(input: unknown): Promise<{ question: string; action: string; url?: string }>;
+  requestPayment?(
+    input: unknown,
+    admit?: (asks: boolean, read?: boolean) => Promise<void>,
+  ): Promise<{ question: string; action: string; url?: string }>;
   integration(
     action: string,
     args: Record<string, unknown>,

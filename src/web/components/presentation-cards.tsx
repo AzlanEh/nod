@@ -11,6 +11,7 @@ import { AlertCircle, Check, ChevronDown, ExternalLink, LockKeyhole, Send } from
 
 export interface CardPick {
   chosen: number[];
+  multiple?: boolean;
   disabled: boolean;
   sent: boolean;
   closed?: boolean;
@@ -21,17 +22,42 @@ export interface CardPick {
 
 export const CardPickContext = createContext<CardPick | null>(null);
 
+const hostLabel = (link: string) => new URL(link).hostname.replace(/^www\./, '');
+
+export function pickLinks(visual: Presentation) {
+  if (visual.type === 'items') return visual.items.map(itemLink);
+  if (visual.type === 'compare') return visual.columns.map((column) => compareColumn(column).url);
+  return [];
+}
+
 export function CardPickSend({
   placeholder = 'Something else',
   action,
+  links,
   children,
 }: {
   placeholder?: string;
   action?: { label: string; icon?: ReactNode };
+  links?: (string | undefined)[];
   children?: ReactNode;
 }) {
   const pick = useContext(CardPickContext);
   const [text, setText] = useState('');
+  const link = pick?.chosen.length === 1 ? links?.[pick.chosen[0]!] : undefined;
+  const extra =
+    children ??
+    (link && (
+      <a
+        className="card-pick-open"
+        href={link}
+        target="_blank"
+        rel="noopener noreferrer"
+        referrerPolicy="no-referrer"
+      >
+        Open on {hostLabel(link)}
+        <ExternalLink size={14} aria-hidden="true" />
+      </a>
+    ));
   if (pick?.closed)
     return (
       <div className="card-band card-pick-send" data-closed>
@@ -39,11 +65,11 @@ export function CardPickSend({
           <LockKeyhole size={13} aria-hidden="true" />
           Read only · this choice has closed
         </p>
-        {children}
+        {extra}
       </div>
     );
   const open = pick && !pick.sent;
-  if (!open && !children) return null;
+  if (!open && !extra) return null;
   const written = text.trim();
   const idle = !open || pick.disabled || (!written && !action && !pick.chosen.length);
   const send = () => {
@@ -73,7 +99,7 @@ export function CardPickSend({
             aria-disabled={idle || undefined}
             onClick={send}
           >
-            {written ? (
+            {written || pick.multiple ? (
               'Send'
             ) : action ? (
               <>
@@ -88,7 +114,7 @@ export function CardPickSend({
           </button>
         </>
       )}
-      {children}
+      {extra}
     </div>
   );
 }
@@ -195,6 +221,7 @@ function Picture({
 }
 
 const pictured = (item: Item) => Boolean(item.image && typeof item.image === 'object');
+const itemLink = (item: Item) => item.url ?? (item.location && mapLocationUrl(item.location));
 
 function Tiles({ visual }: { visual: Visual<'items'> }) {
   const pick = useContext(CardPickContext);
@@ -214,7 +241,7 @@ function Tiles({ visual }: { visual: Visual<'items'> }) {
         data-pictured={gallery || undefined}
       >
         {visual.items.map((item, index) => {
-          const link = item.url ?? (item.location && mapLocationUrl(item.location));
+          const link = itemLink(item);
           const body = (
             <>
               <Picture item={item} className="card-tile-image" keepSpace={gallery} />
@@ -294,7 +321,11 @@ export function Items({ visual }: { visual: Visual<'items'> }) {
     visual.layout !== 'list' &&
     count > 1 &&
     (visual.layout === 'tiles'
-      ? count <= 6 && visual.items.every((item) => !item.facts?.length && !item.journeys)
+      ? count <= 6 &&
+        visual.items.every(
+          (item) =>
+            !item.status && !item.route && !item.warning && !item.facts?.length && !item.journeys,
+        )
       : (count <= 4 && simple) || (count <= 6 && gallery))
   )
     return <Tiles visual={visual} />;
@@ -326,7 +357,7 @@ function List({ visual }: { visual: Visual<'items'> }) {
       >
         {visual.items.map((item, index) => {
           const expandable = Boolean(item.detail || item.facts || item.journeys);
-          const link = item.url ?? (item.location && mapLocationUrl(item.location));
+          const link = itemLink(item);
           const chosen = pick?.chosen.includes(index);
           const row = (
             <>
@@ -447,7 +478,7 @@ function List({ visual }: { visual: Visual<'items'> }) {
                     <Journey key={index} journey={journey} />
                   ))}
                   {item.facts && <Facts items={item.facts} />}
-                  {link && (
+                  {link && !pick && (
                     <a
                       className="button button-outline button-sm card-open"
                       href={link}
@@ -455,7 +486,7 @@ function List({ visual }: { visual: Visual<'items'> }) {
                       rel="noopener noreferrer"
                       referrerPolicy="no-referrer"
                     >
-                      Open on {new URL(link).hostname.replace(/^www\./, '')}
+                      Open on {hostLabel(link)}
                       <ExternalLink size={13} aria-hidden="true" />
                     </a>
                   )}
@@ -547,7 +578,7 @@ function Pins({
           ))}
         </div>
         {items.map((item, index) => {
-          const point = mapPoint(item.location, map.zoom);
+          const point = mapPoint(item.location, map.zoom, map.x);
           return (
             <button
               key={index}
@@ -883,7 +914,7 @@ export function Draft({ visual }: { visual: Visual<'draft'> }) {
       >
         {visual.open && (
           <a
-            className="card-draft-open"
+            className="card-pick-open"
             href={visual.open}
             target="_blank"
             rel="noopener noreferrer"

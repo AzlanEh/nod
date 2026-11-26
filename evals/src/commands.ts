@@ -57,7 +57,7 @@ const help = `Nod capability evals
                                a GO, NO-GO or INCONCLUSIVE verdict from the proven gate scenarios; gate
                                scenarios where this code did worse get 7 more attempts on both sides
                                (--resample 7, --enforce exits with an error unless GO, or --baseline-label and
-                               --candidate-label to score already-merged runs)
+                               --candidate-label to score already-merged runs, resampled at their saved commits)
     merge <label>... --label <name>  combine sharded runs into one saved run and rebuild its HTML report
     promote <label>...         give calibrated scenarios that passed all of at least 5 attempts a place in the
                                gate, and remove the ones that did not (writes evals/gate.json)
@@ -319,6 +319,8 @@ export async function main(args: Args) {
       const baselineLabel = text(args, 'baseline-label');
       const candidateLabel = text(args, 'candidate-label');
       const options = runOptions(args);
+      if (options.shard)
+        throw new Error('The gate scores every scenario, so it does not take --shard.');
       const resample = Math.trunc(number(args, 'resample', 0, 20) ?? 7);
       const label =
         options.label ?? `gate-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-')}`;
@@ -326,8 +328,6 @@ export async function main(args: Args) {
       if (baselineLabel || candidateLabel) {
         if (!baselineLabel || !candidateLabel)
           throw new Error('Pass both --baseline-label and --candidate-label.');
-        if (resample > 0 && !baseline)
-          throw new Error('Pass --baseline <git ref> when --resample > 0.');
         result = await evaluateGate({
           root,
           baselineLabel,
