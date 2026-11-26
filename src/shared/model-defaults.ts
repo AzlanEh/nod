@@ -66,5 +66,8 @@ export function defaultModel(provider: ModelProvider, models: ModelChoice[], met
 }
 
 export function defaultEffort(model: ModelChoice): ModelEffort {
-  return model.efforts.includes('medium') ? 'medium' : model.efforts[0];
+  return (
+    (['medium', 'high'] as const).find((effort) => model.efforts.includes(effort)) ??
+    model.efforts[0]
+  );
 }

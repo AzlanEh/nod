@@ -37,7 +37,7 @@ Other providers include Ant Ling, Baseten, Cerebras, DeepSeek, Fireworks AI, Gro
 
 When an account model list is available, Nod loads it. For services with only a bundled catalog, Nod saves the key and checks access on first use. Neither a catalog nor a saved key proves that your account has credit or permission to run every listed model.
 
-You can change the initial choice. A new choice starts at medium effort, or at the model's first listed effort when it has no medium. Nod preserves a working choice when you add another connection. It uses the recommended model when available, otherwise the first supported model in that connection's catalog. For Google Gemini, you must choose a model if Gemini 4 Argon is unavailable. When Bedrock offers several models or profiles, you must also choose because profiles can change where requests are processed.
+You can change the initial choice. A new choice starts at medium effort. A model without medium starts at high, or at its first listed effort when it has neither. Nod preserves a working choice when you add another connection. It uses the recommended model when available, otherwise the first supported model in that connection's catalog. For Google Gemini, you must choose a model if Gemini 4 Argon is unavailable. When Bedrock offers several models or profiles, you must also choose because profiles can change where requests are processed.
 
 New OpenAI and ChatGPT connections prefer GPT-6.2 Sol when OpenAI lists it for your account. Otherwise, OpenAI API connections prefer GPT-6.1 Sol, and ChatGPT connections prefer GPT-6 Sol. Other supported models remain available in the picker.
 
