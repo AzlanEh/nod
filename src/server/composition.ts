@@ -2523,6 +2523,7 @@ async function initializeApplication(
       artifacts,
       writeArtifact: workspace.writeArtifact.bind(workspace),
       readArtifact: workspace.readArtifact.bind(workspace),
+      cardImage: previews?.image ? (url) => previews.image!(url) : undefined,
       mailCheck,
       executeConfirmation: approvals.executeConfirmed,
       stoppedOutcomes: approvals.stoppedOutcomes,
