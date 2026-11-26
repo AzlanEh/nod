@@ -55,6 +55,14 @@ function fail(message: string, statusCode = 400): never {
 }
 
 function makeRoom(tree: Tree, keep: Skill) {
+  while (!fits(tree)) {
+    const withHistory = tree.skills
+      .filter((skill) => skill.history?.length)
+      .toSorted((a, b) => (a.used ?? a.updated).localeCompare(b.used ?? b.updated))[0];
+    if (!withHistory) break;
+    withHistory.history = withHistory.history!.slice(1);
+    if (!withHistory.history.length) delete withHistory.history;
+  }
   while (tree.skills.length > maxSkills || !fits(tree)) {
     const idle = tree.skills
       .filter((skill) => skill !== keep && !skill.edited)
@@ -238,21 +246,18 @@ export function createLearnedSkills(options: {
   async function recordOutcome(name: string, succeeded: boolean) {
     const target = skillName.parse(name);
     await memory
-      .edit(
-        (tree) => {
-          const skill = tree.skills.find((item) => item.name === target);
-          if (!skill) return;
-          if (succeeded) {
-            skill.failures = 0;
-            skill.stale = false;
-          } else {
-            const nextFailures = (skill.failures ?? 0) + 1;
-            skill.failures = nextFailures;
-            if (nextFailures >= staleFailureThreshold) skill.stale = true;
-          }
-        },
-        { allowDisabled: true },
-      )
+      .edit((tree) => {
+        const skill = tree.skills.find((item) => item.name === target);
+        if (!skill) return;
+        if (succeeded) {
+          skill.failures = 0;
+          skill.stale = false;
+        } else {
+          const nextFailures = (skill.failures ?? 0) + 1;
+          skill.failures = nextFailures;
+          if (nextFailures >= staleFailureThreshold) skill.stale = true;
+        }
+      })
       .catch(() => {});
   }
 

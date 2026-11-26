@@ -29,9 +29,11 @@ export function createProcedureCurator(options: {
   learnedSkills: LearnedSkills;
   curator: MemoryCurator;
   builtIn: readonly string[];
+  redact?: (text: string) => string;
   consumers?: WorkConsumers;
 }) {
   const { pool, ownerId, memory, learnedSkills, curator, builtIn } = options;
+  const redact = options.redact ?? ((text: string) => text);
 
   async function inspectTask(taskId: string) {
     if (!curator.configured) return;
@@ -46,7 +48,12 @@ export function createProcedureCurator(options: {
         revision: number;
         turn_id: string | null;
       }>(
-        "SELECT id,title,done_when,result,revision,turn_id FROM tasks WHERE id=$1 AND owner_id=$2 AND state='done'",
+        `SELECT t.id,t.title,t.done_when,t.result,t.revision,t.turn_id FROM tasks t
+         WHERE t.id=$1 AND t.owner_id=$2 AND t.state='done' AND t.activity_key IS NULL
+           AND EXISTS (
+             SELECT 1 FROM turns u WHERE u.owner_id=t.owner_id AND u.session_id=t.session_id
+               AND NOT u.proactive AND u.source IN ('user','schedule','task')
+           )`,
         [taskId, ownerId],
       )
     ).rows[0];
@@ -58,7 +65,7 @@ export function createProcedureCurator(options: {
          ORDER BY e.created_at,e.id LIMIT 30`,
         [taskId, ownerId],
       )
-    ).rows.map((row) => row.summary);
+    ).rows.map((row) => redact(row.summary));
     if (steps.length < 2 && task.revision < 2) return;
     const ownerMessages = (
       await pool.query<{ text: string }>(
@@ -67,19 +74,19 @@ export function createProcedureCurator(options: {
          ORDER BY m.created_at LIMIT 8`,
         [taskId, ownerId],
       )
-    ).rows.map((row) => row.text.slice(0, 600));
+    ).rows.map((row) => redact(row.text.slice(0, 600)));
     const reply = proposalSchema.safeParse(
       await curator.curate(
         {
           task: 'skill',
           instructions: instructions(builtIn),
           input: {
-            title: task.title,
-            doneWhen: task.done_when,
+            title: redact(task.title),
+            doneWhen: redact(task.done_when),
             revisedByOwner: task.revision > 1,
             ownerMessages,
             steps,
-            result: task.result.slice(0, 800),
+            result: redact(task.result.slice(0, 800)),
           },
           automatic: true,
         },
@@ -101,7 +108,7 @@ export function createProcedureCurator(options: {
         },
         task.turn_id,
       )
-      .catch(() => {});
+      .catch((error) => logFailure('procedure_curate_save_failed', error, { taskId }));
   }
 
   async function enqueue(taskId: string) {

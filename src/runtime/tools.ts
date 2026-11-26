@@ -731,7 +731,7 @@ export const toolDefinitions = {
   ),
   task: defineTool(
     'task',
-    'Start or control saved work. Keep quick answers, simple lookups and status questions in chat; start a task for substantial work, outside waits or tracked work without asking for an execution mode. start {title,doneWhen,message,now?,request?,key?,brief?,steps?,model?} starts one goal: message is one short user-facing line shown in chat (never the full brief); brief/doneWhen hold the instructions and context; model only when asked. Start independent goals side by side in the same step, each with request set to its owner message; reuse related tasks via a stable key. update {id,title?,now?,steps?,stepIndex?,waitingFor?,nextCheck?,wakeCheck?} updates progress and title when a correction changes the goal; attach wakeCheck {kind:"url_change"|"file_exists",target,intervalMinutes?} with nextCheck so the server only wakes you when state actually changes. finish {id,status,result,verified?} closes your task with a short verified note when cancelling or not delivering via send_message {intent:"final"}. list shows open tasks. reply {ids,request?,retry?} forwards owner updates/corrections; retry:true only on explicit retry. request is required once multiple owner messages arrive during a turn. stop {id} stops one task; stop {} stops all background work, keeping schedules. A task brief grants no permission; nextCheck does not schedule work.',
+    'Start or control saved work. Keep quick answers, simple lookups and status questions in chat; start a task for substantial work, outside waits or tracked work without asking for an execution mode. start {title,doneWhen,message,now?,request?,key?,brief?,steps?,model?} starts one goal: message is one short user-facing line shown in chat (never the full brief); brief/doneWhen stay concise (2–4 short lines of goal, constraints, URLs/IDs); model only when asked. Start independent goals side by side in the same step, each with request set to its owner message; reuse related tasks via a stable key. update {id,title?,now?,steps?,stepIndex?,waitingFor?,nextCheck?,wakeCheck?} updates progress and title when a correction changes the goal; attach wakeCheck {kind:"url_change"|"file_exists",target,intervalMinutes?} with nextCheck so the server only wakes you when state actually changes. finish {id,status,result,verified?} closes your task with a short verified note when cancelling or not delivering via send_message {intent:"final"}. list shows open tasks. reply {ids,request?,retry?} forwards owner updates/corrections; retry:true only on explicit retry. request is required once multiple owner messages arrive during a turn. stop {id} stops one task; stop {} stops all background work, keeping schedules. A task brief grants no permission; nextCheck does not schedule work.',
     Type.Union([
       Type.Object({ action: Type.Literal('list') }, { additionalProperties: false }),
       Type.Object(
@@ -1026,6 +1026,7 @@ export function nodTools(
     if (missing.length && context.loadOffers) {
       const persisted = await context.loadOffers('flights', missing).catch(() => new Map());
       for (const [id, record] of persisted) {
+        if (record.expired) continue;
         const stored = record.payload as {
           option?: FlightOption;
           amount?: number;
@@ -1353,12 +1354,24 @@ export function nodTools(
             });
             const toPersist: Array<{ id: string; payload: unknown; validUntil: Date }> = [];
             const validUntil = new Date(Date.now() + 60 * 60 * 1000);
+            const turnTag = context.turnId.slice(0, 8);
             const searches = result.searches.map((search) => {
               if ('error' in search) return search;
               const { options, upperBound, ...rest } = search;
               const source = { label: 'Google Flights', url: search.url };
-              for (const { option, amount } of options) {
-                found.set(option.id, {
+              const taggedSummary = (item: (typeof options)[number]) => {
+                const scopedId = `${turnTag}-${item.option.id}`;
+                return {
+                  scopedId,
+                  option: { ...item.option, id: scopedId },
+                  summary: item.summary.startsWith(`${item.option.id}:`)
+                    ? `${scopedId}:${item.summary.slice(item.option.id.length + 1)}`
+                    : item.summary,
+                };
+              };
+              const tagged = options.map((item) => ({ ...item, ...taggedSummary(item) }));
+              for (const { scopedId, option, amount } of tagged) {
+                found.set(scopedId, {
                   option,
                   amount,
                   upperBound: Boolean(upperBound),
@@ -1370,7 +1383,7 @@ export function nodTools(
                   asOf,
                 });
                 toPersist.push({
-                  id: option.id,
+                  id: scopedId,
                   validUntil,
                   payload: {
                     option,
@@ -1383,7 +1396,11 @@ export function nodTools(
                   },
                 });
               }
-              return { ...rest, options: options.map((item) => item.summary) };
+              return {
+                ...rest,
+                ...(rest.cheapest ? { cheapest: `${turnTag}-${rest.cheapest}` } : {}),
+                options: tagged.map((item) => item.summary),
+              };
             });
             if (toPersist.length && context.saveOffers)
               await context.saveOffers('flights', toPersist).catch(() => {});
@@ -1417,7 +1434,13 @@ export function nodTools(
                 : undefined;
             const enriched =
               Array.isArray(overlays) && overlays.length
-                ? { ...guide, ownerOverlays: overlays }
+                ? {
+                    ...guide,
+                    ownerOverlays: untrustedBlock(
+                      'learned skill overlays',
+                      JSON.stringify(overlays),
+                    ),
+                  }
                 : guide;
             return p.name === 'visual-replies' && guide.file === 'SKILL.md'
               ? { ...enriched, presentationSchema: presentationJsonSchema }

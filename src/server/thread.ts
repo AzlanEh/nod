@@ -417,13 +417,14 @@ export async function withTurnLock<T>(
   const expectedFence = typeof turn === 'string' ? undefined : turn.fenceToken;
   const execute = async (client: PoolClient) => {
     signal?.throwIfAborted();
-    const { rows } = await client.query<{ status: string; fence_token: number }>(
-      `SELECT u.status,u.fence_token FROM turns u JOIN threads th ON th.id=u.thread_id
+    const { rows } = await client.query<{ status: string; fence_token: number; expired: boolean }>(
+      `SELECT u.status,u.fence_token,(u.lease_expires_at IS NOT NULL AND u.lease_expires_at<=now()) AS expired
+       FROM turns u JOIN threads th ON th.id=u.thread_id
        WHERE u.id=$1 AND u.owner_id=$2 AND th.archived_at IS NULL FOR NO KEY UPDATE OF u`,
       [turnId, ownerId],
     );
     signal?.throwIfAborted();
-    if (rows[0]?.status !== 'running') throw turnStopped();
+    if (rows[0]?.status !== 'running' || rows[0]?.expired) throw turnStopped();
     if (expectedFence !== undefined && rows[0].fence_token !== expectedFence) throw turnStopped();
     return operation(client);
   };
@@ -1764,10 +1765,10 @@ async function failTurn(
     if (modelFailure) await withdraw(client, [turnId], false);
     const task = turn.task_id
       ? (
-          await client.query('SELECT message_id FROM tasks WHERE id=$1 AND owner_id=$2', [
-            turn.task_id,
-            ownerId,
-          ])
+          await client.query(
+            'UPDATE tasks SET updated_at=now() WHERE id=$1 AND owner_id=$2 RETURNING message_id',
+            [turn.task_id, ownerId],
+          )
         ).rows[0]
       : undefined;
     return { ...turn, taskMessageId: task?.message_id as string | undefined };
@@ -1914,14 +1915,22 @@ export async function sweepExpiredTurns(present?: ThreadDependencies['present'])
   await cardInteractions.expireOffers().catch(() => {});
   const { rows } = await pool.query<{ id: string }>(
     `SELECT id FROM turns
-     WHERE owner_id=$1 AND status='running' AND lease_expires_at IS NOT NULL AND lease_expires_at<now()`,
+     WHERE owner_id=$1 AND status='running' AND lease_expires_at IS NOT NULL AND lease_expires_at<=now()`,
     [ownerId],
   );
+  let swept = 0;
   for (const row of rows) {
-    running.get(row.id)?.abort();
-    await failTurn(row.id, present);
+    abortTurns([row.id]);
+    const expired = await pool
+      .query<{ id: string }>(
+        `SELECT id FROM turns
+         WHERE id=$1 AND owner_id=$2 AND status='running' AND lease_expires_at IS NOT NULL AND lease_expires_at<=now()`,
+        [row.id, ownerId],
+      )
+      .then((res) => res.rowCount ?? 0);
+    if (expired && (await failTurn(row.id, present))) swept++;
   }
-  return rows.length;
+  return swept;
 }
 
 async function takeQueuedMessages(turnId: string, sessionId: string, channel: string) {
@@ -2291,11 +2300,13 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
     void pool
       .query(
         `UPDATE turns SET lease_expires_at=now()+($3::bigint * interval '1 millisecond')
-         WHERE id=$1 AND owner_id=$2 AND status='running' AND ($4::integer IS NULL OR fence_token=$4)`,
+         WHERE id=$1 AND owner_id=$2 AND status='running'
+           AND (lease_expires_at IS NULL OR lease_expires_at>now())
+           AND ($4::integer IS NULL OR fence_token=$4)`,
         [turnId, ownerId, turnLeaseMs, fenceToken ?? null],
       )
       .then(({ rowCount }) => {
-        if (!rowCount) controller.abort();
+        if (!rowCount) abortTurns([turnId]);
       })
       .catch(() => {});
   };
@@ -2304,7 +2315,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
   let timedOut = false;
   const wallClockTimer = setTimeout(() => {
     timedOut = true;
-    controller.abort();
+    abortTurns([turnId]);
   }, turnMaxWallClockMs);
   wallClockTimer.unref();
   const current = async <T>(operation: (client: PoolClient) => Promise<T>) => {
@@ -2895,7 +2906,17 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
               : undefined;
           const sourcePrompt =
             bound && burst.length > 1 && bound === burst.at(-1) ? initialPrompt : undefined;
-          return dependencies.task!(ref, input, bound, prior?.id, prior?.handoff, sourcePrompt);
+          return dependencies.task!(
+            ref,
+            input,
+            bound,
+            prior?.id,
+            prior?.handoff,
+            sourcePrompt,
+          ).then((res) => {
+            if (input.action === 'start') replyCommitted = true;
+            return res;
+          });
         }),
       takeMessages:
         turn.background && !taskContext
@@ -3137,8 +3158,18 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
           await dependencies.bindVerificationQuestion?.(turnId, messageId, client);
       }
     }).catch((error) => {
-      if (!signal.aborted) throw error;
+      if (!signal.aborted || timedOut) throw error;
     });
+    if (timedOut) {
+      outcome = 'failed';
+      await failTurn(
+        turnId,
+        dependencies.present,
+        'This turn reached its 30-minute runtime limit and was stopped.',
+        { expected: true, failure: 'unknown' },
+      );
+      return;
+    }
     outcome = signal.aborted ? 'cancelled' : result.status;
     if (outcome === 'waiting_credentials') waitingReason = 'credentials';
     else if (outcome === 'waiting_user') waitingReason = result.waitingFor ?? 'question';
@@ -3199,6 +3230,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
       const retryableReadOnly =
         (failure === 'offline' || failure === 'model') &&
         !replyCommitted &&
+        ownerMessageIds.length <= 1 &&
         !(error instanceof ContextLimitError) &&
         !(error instanceof OutputLimitError) &&
         Number(turn.retry_count ?? 0) < maxReadOnlyRetries;
@@ -3216,6 +3248,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
                  WHERE a.owner_id=u.owner_id AND a.status IN ('confirmed','executing','uncertain','completed'))
                AND NOT EXISTS (SELECT 1 FROM app_actions aa JOIN chain c ON c.id=aa.turn_id
                  WHERE aa.owner_id=u.owner_id AND aa.status IN ('executing','completed','uncertain'))
+               AND NOT EXISTS (SELECT 1 FROM tasks t WHERE t.owner_id=u.owner_id AND t.turn_id=u.id)
              FOR UPDATE`,
             [turnId, ownerId, threadId, fenceToken ?? null],
           );

@@ -493,7 +493,10 @@ export function MessageBubble({
   );
   const openAnswered = openChosen >= 0;
   const interactionClosed = Boolean(
-    pickQuestion?.interaction && pickQuestion.interaction.status !== 'open',
+    pickQuestion?.interaction &&
+    (pickQuestion.interaction.status === 'expired' ||
+      pickQuestion.interaction.status === 'superseded' ||
+      pickQuestion.interaction.status === 'cancelled'),
   );
   const interactionSelected = pickQuestion?.interaction?.selectedOptionIds;
   const effectiveAnsweredIds = answeredIds ?? interactionSelected;

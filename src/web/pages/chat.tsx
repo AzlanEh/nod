@@ -2464,10 +2464,13 @@ export function Chat({
                       answersDisabled={sending || !state.configuration.llmReady || welcoming}
                       onRetry={
                         message.role === 'assistant' &&
-                        message.streamId?.startsWith('failure:') &&
-                        !message.text.includes('may not have finished') &&
-                        !message.text.includes('result is unknown') &&
-                        !message.text.includes('uncertain')
+                        message.retryable &&
+                        index === state.messages.length - 1 &&
+                        !sending &&
+                        !state.turns.some(
+                          (turn) => turn.status === 'running' || turn.status === 'queued',
+                        ) &&
+                        state.configuration.llmReady
                           ? () => {
                               void send(
                                 'Continue',

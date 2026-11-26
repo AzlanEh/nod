@@ -34,6 +34,7 @@ import {
   activeHandoffSql,
   activeThread,
   chatRecovery,
+  lockThread,
   ownerStarted,
   pendingAnswerChoicesSql,
   reactToAssistantMessage,
@@ -76,6 +77,14 @@ const messageFields = `m.id,m.role,m.text,CASE WHEN m.role='user' THEN m.display
    WHERE a.reply_to_message_id=m.id AND a.owner_id=m.owner_id AND a.role='user' AND a.question_answer IS NOT NULL AND a.text<>'' AND jsonb_array_length(a.attachments)=0 ORDER BY a.created_at,a.id LIMIT 1) END AS "choiceAnswer",
  CASE WHEN m.role='assistant' THEN (SELECT json_build_object('id',ci.id,'status',ci.status,'selectedOptionIds',ci.selected_option_ids,'validUntil',ci.valid_until) FROM card_interactions ci
    WHERE ci.message_id=m.id AND ci.owner_id=m.owner_id ORDER BY ci.created_at DESC LIMIT 1) END AS "interaction",
+ (m.role='assistant' AND m.stream_id LIKE 'failure:%' AND EXISTS (
+   SELECT 1 FROM turns u WHERE u.id=m.turn_id AND u.owner_id=m.owner_id
+     AND u.status='failed' AND u.outside_action_at IS NULL
+     AND NOT EXISTS (SELECT 1 FROM approvals a WHERE a.owner_id=u.owner_id AND (a.turn_id=u.id OR a.execution_turn_id=u.id)
+       AND a.status IN ('confirmed','executing','uncertain','completed'))
+     AND NOT EXISTS (SELECT 1 FROM app_actions aa WHERE aa.owner_id=u.owner_id AND aa.turn_id=u.id
+       AND aa.status IN ('executing','completed','uncertain'))
+ )) AS "retryable",
  CASE WHEN m.role='assistant' THEN (SELECT json_build_object('id',a.id,'status',a.status,'action',a.action,'title',a.title,'decline',a.decline,'cardQuestion',a.card_question,'args',a.args,'failure',CASE WHEN a.status IN ('expired','uncertain') AND jsonb_typeof(a.result->'error')='string' THEN a.result->>'error' END,'active',u.status IN ('running','waiting'),'executionActive',e.status IN ('queued','running','waiting')) FROM approvals a
    JOIN turns u ON u.id=a.turn_id AND u.owner_id=a.owner_id LEFT JOIN turns e ON e.id=a.execution_turn_id AND e.owner_id=a.owner_id
    WHERE a.confirmation_message_id=m.id AND a.owner_id=m.owner_id LIMIT 1) END AS "approval",
@@ -162,6 +171,7 @@ type MessageRow = Omit<
   choiceAnswer?: ChoiceAnswerRow | null;
   interaction?: InteractionRow | null;
   cardAnswer?: boolean | null;
+  retryable?: boolean | null;
 };
 
 function messageView(row: MessageRow): Message {
@@ -176,6 +186,7 @@ function messageView(row: MessageRow): Message {
     choiceAnswer,
     interaction,
     cardAnswer,
+    retryable,
     work,
     ...message
   } = row;
@@ -222,6 +233,7 @@ function messageView(row: MessageRow): Message {
         }
       : {}),
     ...(cardAnswer ? { cardAnswer: true as const } : {}),
+    ...(retryable ? { retryable: true } : {}),
     ...(work ? { work } : {}),
     reactions: [
       ...(message.reaction ? [{ actor: 'user' as const, reaction: message.reaction }] : []),
@@ -609,6 +621,7 @@ export async function createApp(dependencies: AppDependencies = {}) {
         code: 'model_required',
       });
     const result = await transaction(async (client) => {
+      await lockThread(client);
       const outcome = await cardInteractions.selectInteraction(client, id, optionIds);
       if (!outcome.ok) return outcome;
       if (outcome.alreadySelected) return outcome;

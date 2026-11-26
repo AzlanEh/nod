@@ -772,7 +772,7 @@ export function createTasks(options: {
       const parsedCheck = wakeCheck.parse(row.wake_check);
       const outcome: { changed: boolean; baseline?: string; summary?: string } =
         await options.evaluateWakeCheck!(threadId, row.id, parsedCheck).catch(() => ({
-          changed: true,
+          changed: false,
         }));
       if (!outcome.changed) {
         const minutes = parsedCheck.intervalMinutes ?? 15;
@@ -782,12 +782,14 @@ export function createTasks(options: {
           const nextWake = outcome.baseline
             ? { ...parsedCheck, baseline: outcome.baseline }
             : parsedCheck;
-          await client.query(
+          const res = await client.query(
             `UPDATE tasks SET next_check=$3,wake_check=$4::jsonb,updated_at=now()
-             WHERE id=$1 AND owner_id=$2 AND state='open' AND next_check=$5`,
+             WHERE id=$1 AND owner_id=$2 AND state='open' AND next_check=$5
+               AND NOT EXISTS (SELECT 1 FROM turns u WHERE u.owner_id=tasks.owner_id AND u.session_id=tasks.session_id
+                 AND (u.status IN ('queued','running') OR (${waitingTurnSql('u')})))`,
             [row.id, ownerId, nextAt, JSON.stringify(nextWake), row.next_check],
           );
-          await wakeThreadAt(client, nextAt);
+          if (res.rowCount) await wakeThreadAt(client, nextAt);
         }, pool);
         continue;
       }
@@ -795,18 +797,11 @@ export function createTasks(options: {
       const woke = await transaction(async (client) => {
         if ((await lockThread(client)).id !== threadId) return false;
         const claimed = await client.query(
-          `UPDATE tasks SET next_check=NULL,
-           wake_check=CASE WHEN $4::jsonb IS NOT NULL THEN $4::jsonb ELSE wake_check END,
-           updated_at=now()
-           WHERE id=$1 AND owner_id=$2 AND state='open' AND next_check=$3`,
-          [
-            row.id,
-            ownerId,
-            row.next_check,
-            outcome.baseline
-              ? JSON.stringify({ ...parsedCheck, baseline: outcome.baseline })
-              : null,
-          ],
+          `UPDATE tasks SET next_check=NULL,wake_check=NULL,updated_at=now()
+           WHERE id=$1 AND owner_id=$2 AND state='open' AND next_check=$3
+             AND NOT EXISTS (SELECT 1 FROM turns u WHERE u.owner_id=tasks.owner_id AND u.session_id=tasks.session_id
+               AND (u.status IN ('queued','running') OR (${waitingTurnSql('u')})))`,
+          [row.id, ownerId, row.next_check],
         );
         if (!claimed.rowCount) return false;
         await resumeTurn(

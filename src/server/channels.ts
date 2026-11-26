@@ -118,6 +118,18 @@ interface ChannelOptions {
       stopSignal?: AbortSignal;
     },
   ) => Promise<void>;
+  acceptInteraction?: (
+    client: PoolClient,
+    input: {
+      sourceId: string;
+      channel: string;
+      messageId: string;
+      replyToMessageId: string;
+      text: string;
+      choiceIds: string[];
+      stopSignal?: AbortSignal;
+    },
+  ) => Promise<string>;
   reacted?: (messageId: string, reaction: string | null) => Promise<unknown>;
   subscribe: (listener: () => void) => () => void;
   refresh?: () => void;
@@ -655,13 +667,18 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
     if (active()) {
       result = await transaction<Parameters<InboundInteraction['acknowledge']>[0]>(
         async (client) => {
+          const current = await options.activeThread?.(client);
           const row = (
-            await client.query<{ options: Array<{ id: string; label: string }> }>(
-              "SELECT options FROM card_interactions WHERE id=$1 AND owner_id=$2 AND status='open' FOR UPDATE",
+            await client.query<{
+              options: Array<{ id: string; label: string }>;
+              thread_id: string;
+            }>(
+              "SELECT options,thread_id FROM card_interactions WHERE id=$1 AND owner_id=$2 AND status='open' FOR UPDATE",
               [input.interactionId, ownerId],
             )
           ).rows[0];
-          const option = row?.options?.[input.optionIndex];
+          if (!row || (current && current.id !== row.thread_id) || !active()) return 'unavailable';
+          const option = row.options?.[input.optionIndex];
           if (!option) return 'unavailable';
           const outcome = await cardInteractions.selectInteraction(client, input.interactionId, [
             option.id,
@@ -669,19 +686,53 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
           if (!outcome.ok) return 'unavailable';
           if (!outcome.alreadySelected) {
             const text = choiceAnswerText(outcome.selected);
-            await options.submit(
-              text,
-              `interaction:${input.interactionId}:${option.id}`,
-              client,
-              `${channelId}:${input.accountId}`,
-              randomUUID(),
-              undefined,
-              outcome.interaction.messageId,
+            const channel = conversationChannel(identity);
+            const sourceId = `interaction:${input.interactionId}:${option.id}`;
+            const messageId = randomUUID();
+            const turnId = options.acceptInteraction
+              ? await options.acceptInteraction(client, {
+                  sourceId,
+                  channel,
+                  messageId,
+                  replyToMessageId: outcome.interaction.messageId,
+                  text,
+                  choiceIds: outcome.selected.map((opt) => opt.id),
+                  stopSignal: stop,
+                })
+              : await options.submit(
+                  text,
+                  sourceId,
+                  client,
+                  channel,
+                  messageId,
+                  undefined,
+                  outcome.interaction.messageId,
+                  undefined,
+                  undefined,
+                  stop,
+                );
+            await client.query(
+              `INSERT INTO channel_inbox(source_id,provider,account_id,sender_id,thread_id,text,received_at,message_id,state,turn_id,owner_id,channel,conversation_thread_id)
+               VALUES($1,$2,$3,$4,$5,$6,now(),$7,'submitted',$8,$9,$10,$11) ON CONFLICT(source_id) DO NOTHING`,
+              [
+                sourceId,
+                channelId,
+                input.accountId,
+                input.senderId,
+                input.threadId,
+                text,
+                messageId,
+                turnId,
+                ownerId,
+                channel,
+                row.thread_id,
+              ],
             );
           }
           return 'recorded';
         },
         pool,
+        signal,
       ).catch((cause) => {
         logFailure('channel_interaction_failed', cause);
         return 'unavailable' as const;

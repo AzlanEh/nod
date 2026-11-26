@@ -1,5 +1,5 @@
 import { transaction } from './transaction.ts';
-import { mkdir, stat } from 'node:fs/promises';
+import { lstat, mkdir, realpath } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,6 +8,9 @@ import { isEnterKey } from '../shared/browser-keys.ts';
 import { z } from 'zod';
 import {
   appConfirmation,
+  ContextLimitError,
+  ModelRequestError,
+  OutputLimitError,
   type Agent,
   type BrowserStep,
   type RuntimeObservation,
@@ -91,6 +94,7 @@ import {
   ownerAddress,
   ownerFetch,
   publicHttps,
+  safeRemoteFetch,
 } from '../providers/discovered/remote.ts';
 import { createDiscoveredOAuth } from '../providers/discovered/oauth.ts';
 import { createDiscoveredConnections } from './discovered-connections.ts';
@@ -193,7 +197,7 @@ import {
   createTextRedactor,
   environmentSecrets,
 } from './redaction.ts';
-import { createLedger, limitsInput } from './ledger.ts';
+import { createLedger, limitsInput, spendingLimitReached } from './ledger.ts';
 import { createActivityLog } from './activity-log.ts';
 import { actionTarget, objectIds, recordedTitle } from './action-presentation.ts';
 import { usageFileName, usagePdf } from './usage-report.ts';
@@ -1146,6 +1150,7 @@ async function initializeApplication(
     learnedSkills,
     curator,
     builtIn: builtInSkillNames,
+    redact: createErrorRedactor(secrets),
     consumers,
   });
   const turnUsedSkills = new Map<string, Set<string>>();
@@ -1232,25 +1237,63 @@ async function initializeApplication(
     clearBrowser: (id) => adapters.computer.clear(id),
     evaluateWakeCheck: async (threadId, taskId, check) => {
       if (check.kind === 'file_exists') {
-        const root = resolve(dataRoot, 'workspaces', threadId);
-        const taskRoot = resolve(root, 'tasks', taskId);
+        const taskRoot = resolve(dataRoot, 'workspaces', threadId, 'tasks', taskId);
         const full = resolve(taskRoot, check.target);
-        if (!full.startsWith(`${root}/`) && full !== root) return { changed: false };
-        const exists = await stat(full)
-          .then((info) => info.isFile() || info.isDirectory())
-          .catch(() => false);
-        return exists
-          ? { changed: true, summary: `Workspace path ${check.target} is now present.` }
-          : { changed: false };
+        if (!full.startsWith(`${taskRoot}/`) && full !== taskRoot) return { changed: false };
+        const realTaskRoot = await realpath(taskRoot).catch(() => taskRoot);
+        const info = await lstat(full).catch(() => null);
+        if (!info || info.isSymbolicLink() || (!info.isFile() && !info.isDirectory())) {
+          return check.baseline === 'absent'
+            ? { changed: false, baseline: 'absent' }
+            : { changed: false, baseline: 'absent' };
+        }
+        const realFull = await realpath(full).catch(() => null);
+        if (!realFull || (!realFull.startsWith(`${realTaskRoot}/`) && realFull !== realTaskRoot))
+          return { changed: false };
+        if (check.baseline === 'present') return { changed: false, baseline: 'present' };
+        return {
+          changed: true,
+          baseline: 'present',
+          summary: `Workspace path ${check.target} is now present.`,
+        };
       }
-      const response = await ownerFetch(check.target, publicHttps)(check.target, {
+      const response = await safeRemoteFetch(check.target, {
         method: 'GET',
         headers: { accept: 'text/plain, text/html, application/json;q=0.9, */*;q=0.5' },
         signal: AbortSignal.timeout(10_000),
       });
-      if (!response.ok) return { changed: true, summary: `URL returned HTTP ${response.status}.` };
-      const body = (await response.text()).slice(0, 65_536);
-      const fingerprint = createHash('sha256').update(body).digest('hex');
+      if (!response.ok) {
+        const fingerprint = `http:${response.status}`;
+        if (!check.baseline || check.baseline === fingerprint)
+          return { changed: false, baseline: fingerprint };
+        return {
+          changed: true,
+          baseline: fingerprint,
+          summary: `URL returned HTTP ${response.status}.`,
+        };
+      }
+      const reader = response.body?.getReader();
+      const chunks: Uint8Array[] = [];
+      let total = 0;
+      const limit = 65_536;
+      if (reader) {
+        try {
+          while (total < limit) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (value?.byteLength) {
+              const take = Math.min(value.byteLength, limit - total);
+              chunks.push(take === value.byteLength ? value : value.subarray(0, take));
+              total += take;
+            }
+          }
+        } finally {
+          await reader.cancel().catch(() => {});
+        }
+      }
+      const hash = createHash('sha256');
+      for (const chunk of chunks) hash.update(chunk);
+      const fingerprint = hash.digest('hex');
       if (!check.baseline) return { changed: false, baseline: fingerprint };
       if (fingerprint === check.baseline) return { changed: false, baseline: fingerprint };
       return {
@@ -2611,7 +2654,15 @@ async function initializeApplication(
                     const used = turnUsedSkills.get(context.turnId);
                     if (used?.size) {
                       turnUsedSkills.delete(context.turnId);
-                      for (const name of used) void learnedSkills.recordOutcome(name, false);
+                      const transient =
+                        context.signal?.aborted ||
+                        error instanceof ModelRequestError ||
+                        error instanceof ContextLimitError ||
+                        error instanceof OutputLimitError ||
+                        (error instanceof Error &&
+                          (error.name === 'AbortError' || error.message === spendingLimitReached));
+                      if (!transient)
+                        for (const name of used) void learnedSkills.recordOutcome(name, false);
                     }
                     throw error;
                   },
@@ -3722,6 +3773,18 @@ async function initializeApplication(
           stopSignal,
         });
       },
+      acceptInteraction: async (client, input) =>
+        (
+          await userMessages.submit(input.text, [], {
+            sourceId: input.sourceId,
+            channel: input.channel,
+            client,
+            clientMessageId: input.messageId,
+            replyToMessageId: input.replyToMessageId,
+            questionAnswer: { choiceIds: input.choiceIds },
+            stopSignal: input.stopSignal,
+          })
+        ).turnId,
     });
     channels.registerRoutes(app);
     await channelSettings?.recover();
