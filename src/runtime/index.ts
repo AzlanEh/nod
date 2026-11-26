@@ -1116,6 +1116,8 @@ export function createAgentRuntime(dependencies: {
         let answer = '';
         let partialAnswer = '';
         let draftText = '';
+        let partialFresh = false;
+        let draftFresh = false;
         const childFindings: string[] = [];
         let failure: string | undefined;
         let incomplete = false;
@@ -1127,6 +1129,8 @@ export function createAgentRuntime(dependencies: {
         const spent = () =>
           Promise.reject(new Error('No tool steps are left. Answer now with what you found.'));
         const recordFinding = (name: string, output: unknown) => {
+          partialFresh = false;
+          draftFresh = false;
           const text = isToolResult(output)
             ? output.content.flatMap((part) => (part.type === 'text' ? [part.text] : [])).join('\n')
             : typeof output === 'string'
@@ -1142,6 +1146,8 @@ export function createAgentRuntime(dependencies: {
         };
         const collectedAnswer = () =>
           answer.trim() ||
+          (draftFresh && draftText.trim()) ||
+          (partialFresh && partialAnswer.trim()) ||
           (childFindings.length
             ? `Partial findings before stopping:\n${childFindings.join('\n\n')}`
             : '') ||
@@ -1199,11 +1205,18 @@ export function createAgentRuntime(dependencies: {
             },
             onEvent: (event) => {
               countUsage(event);
-              if (event.type === 'message_start') draftText = '';
+              if (event.type === 'message_start') {
+                draftText = '';
+                draftFresh = true;
+              }
               if (event.type === 'text_delta') draftText += event.text;
               if (event.type === 'message_end') {
-                if (draftText.trim()) partialAnswer = draftText.trim();
+                if (draftText.trim()) {
+                  partialAnswer = draftText.trim();
+                  partialFresh = draftFresh;
+                }
                 draftText = '';
+                draftFresh = false;
                 if (event.status === 'incomplete') incomplete = true;
               }
               if (event.type === 'final') {

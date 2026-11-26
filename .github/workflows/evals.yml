@@ -151,7 +151,7 @@ jobs:
 
           baseline_run=""
           if [ -n "$base" ] && [ "$FRESH_BASELINE" != "true" ] && [ "$TIER" = "full" ] \
-            && [ -z "$SCENARIO$CAPABILITY$BUDGET" ] && git diff --quiet "$base" HEAD -- evals Dockerfile.workspace Dockerfile.browser src/shared src/providers/process.ts src/providers/agent-browser/index.ts src/providers/decisions.ts src/providers/pi/models.ts src/providers/pi/context.ts src/providers/pi/memory-curator.ts src/server/access.ts src/server/trust-basis.ts src/server/trust-review.ts src/server/owner-instructions.ts; then
+            && [ -z "$SCENARIO$CAPABILITY$BUDGET" ] && git diff --quiet "$base" HEAD -- evals Dockerfile.workspace Dockerfile.browser src/shared src/providers/process.ts src/providers/agent-browser/index.ts src/providers/decisions.ts src/providers/pi/models.ts src/providers/pi/context.ts src/providers/pi/memory-curator.ts src/server/access.ts src/server/trust-basis.ts src/server/trust-review.ts src/server/trust-jev-policy.ts src/server/owner-instructions.ts; then
             nightly="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow evals.yml --event schedule \
               --branch main --commit "$base" --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty' || true)"
             if [ -n "$nightly" ] && gh run download "$nightly" --repo "$GITHUB_REPOSITORY" \

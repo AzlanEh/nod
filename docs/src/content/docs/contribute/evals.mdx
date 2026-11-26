@@ -218,7 +218,7 @@ The agent is `openai/gpt-6.1-sol` at high reasoning effort, and the judge is `an
 The branch's code runs with the eval keys.
 :::
 
-When the baseline commit was already scored by a successful nightly run, the workflow reuses that run's results instead of running the baseline again. It does so only for the **full** tier with three attempts, no case filter or spend limit, the same model and judge, and no changes to `evals/` or the Dockerfiles since the baseline. Tick **fresh_baseline** to run the baseline again, for example when provider behaviour may have changed since the night before.
+When the baseline commit was already scored by a successful nightly run, the workflow reuses that run's results instead of running the baseline again. It does so only for the **full** tier with three attempts, no case filter or spend limit, the same model and judge, and no changes to `evals/`, the Dockerfiles, or the shared app files the harness imports since the baseline. Tick **fresh_baseline** to run the baseline again, for example when provider behaviour may have changed since the night before.
 
 With a baseline, the run summary shows the verdict and both sides' scores. Without one, it shows this run's scores. The `capability-evals` artifact, kept for 14 days, has a `report.html` for each run. A low score doesn't fail the workflow. It fails when a shard or the reused baseline left no results, and with a baseline it then reports INCONCLUSIVE.
 

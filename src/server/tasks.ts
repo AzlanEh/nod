@@ -403,8 +403,8 @@ export function createTasks(options: {
         task.session_id === task.id &&
         task.activity_key === null &&
         task.source_message_id &&
-        text.trim() &&
-        !bareConfirmationAnswer(text) &&
+        message.text.trim() &&
+        !bareConfirmationAnswer(message.text) &&
         (
           await client.query(
             `WITH answered AS (

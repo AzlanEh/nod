@@ -2471,6 +2471,12 @@ export function Chat({
                         cardChoices.has(message.id)
                           ? async (value) => {
                               const replying = (id?: string) => id === message.id;
+                              if (replying(replyTo?.id) && composer.current?.hasDraft()) {
+                                composer.current.focus();
+                                throw new Error(
+                                  'Send your answer from the composer to include your edits.',
+                                );
+                              }
                               const result = await send(
                                 value,
                                 [],
