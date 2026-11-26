@@ -121,6 +121,7 @@ const admissions = new AsyncLocalStorage<{
   asked: boolean;
   admit(asks: boolean, read?: boolean): Promise<void>;
 }>();
+const nestedCalls = new AsyncLocalStorage<boolean>();
 const browserTools = new Set(['browser', 'browser_session', 'sign_in', 'pay']);
 const confirmationNotice = 'The confirmation question is in chat. Wait for the reply.';
 const reportingTools = new Set(['ask_user', 'send_message', 'share_file']);
@@ -592,7 +593,7 @@ export function createAgentRuntime(dependencies: {
           assertActive();
           await context.emit('tool_start', label, event({ command }));
           assertActive();
-          const output = await untilAborted(execute(), signal);
+          const output = await untilAborted(nestedCalls.run(nested, execute), signal);
           signal.throwIfAborted();
           if (name === 'computer') learnComputerApps(params, output);
           if (
@@ -934,6 +935,7 @@ export function createAgentRuntime(dependencies: {
                     await gate?.(asks, read);
                   }
                 : gate,
+              nestedCalls.getStore(),
             );
           },
           manage: async (action: string, args: Record<string, unknown>) => {
