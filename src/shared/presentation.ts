@@ -995,10 +995,18 @@ export function flightItems(value: FlightsPresentation): ItemsPresentation {
 const carrier = (flightNumber: string | undefined) =>
   flightNumber?.match(/^([A-Z0-9]{2})\s?\d/)?.[1];
 
-export function presentationImages(
+export function presentationAttachments(
   value: Presentation,
 ): Array<{ artifactId: string; alt: string }> {
   if (value.type === 'image') return [value];
+  if (value.type === 'booking')
+    return [value, ...(value.alternatives ?? [])].flatMap((venue) => venue.photos ?? []);
+  return [];
+}
+
+export function presentationImages(
+  value: Presentation,
+): Array<{ artifactId: string; alt: string }> {
   if (value.type === 'items')
     return [
       ...value.items.flatMap((item) =>
@@ -1012,9 +1020,7 @@ export function presentationImages(
         ? [column.image]
         : [],
     );
-  if (value.type === 'booking')
-    return [value, ...(value.alternatives ?? [])].flatMap((venue) => venue.photos ?? []);
-  return [];
+  return presentationAttachments(value);
 }
 
 type FlightJourney = Extract<

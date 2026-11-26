@@ -2,6 +2,7 @@ import {
   mapFrame,
   pictureAlt,
   pictureSlots,
+  presentationAttachments,
   presentationImages,
   presentationSchema,
   presentationText,
@@ -601,11 +602,14 @@ export async function insertAssistantMessage(
       image.artifactId = stored.id;
     }
     const attached = new Map(attachments.map((item) => [item.id, item]));
-    for (const row of rows)
+    const sharedIds = new Set(presentationAttachments(visual!).map((image) => image.artifactId));
+    for (const row of rows) {
+      if (!sharedIds.has(row.id)) continue;
       attached.set(row.id, {
         ...artifactView(row),
         ...(attached.get(row.id)?.source ? { source: attached.get(row.id)!.source } : {}),
       });
+    }
     attachments = [...attached.values()];
   }
   if (replyToMessageId === undefined) replyToMessageId = turn.taskMessageId ?? null;
@@ -1955,9 +1959,9 @@ async function quickReplies(
   await Promise.all(
     rows.map(async (row) => {
       if (quickChecked.has(row.id)) return;
-      quickChecked.add(row.id);
       const stop = running.get(row.running_id)?.signal;
       if (!stop || stop.aborted) return;
+      quickChecked.add(row.id);
       const text = (
         await write(
           row.running_id,
@@ -2637,7 +2641,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
       if (extra.length) {
         sourceMessageId = extra.at(-1)!.id;
         ownerMessageIds.push(...extra.map((message) => message.id));
-        if (burst.length) burst.push(...extra.map((message) => message.id));
+        burst.push(...extra.map((message) => message.id));
         const parts = [{ text: initialPrompt, audioCaption: loaded.audioCaption }];
         for (const message of extra) {
           const loadedExtra = await loadMessage(message.id);
