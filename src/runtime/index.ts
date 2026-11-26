@@ -89,7 +89,6 @@ const parentTools = new Set([
   'computer',
   'sign_in',
   'pay',
-  'browser_session',
   'ask_user',
   'send_message',
   'create_audio',
@@ -122,7 +121,7 @@ const admissions = new AsyncLocalStorage<{
   admit(asks: boolean, read?: boolean): Promise<void>;
 }>();
 const nestedCalls = new AsyncLocalStorage<boolean>();
-const browserTools = new Set(['browser', 'browser_session', 'sign_in', 'pay']);
+const browserTools = new Set(['browser', 'sign_in', 'pay']);
 const confirmationNotice = 'The confirmation question is in chat. Wait for the reply.';
 const reportingTools = new Set(['ask_user', 'send_message', 'share_file']);
 const reportingTaskActions = new Set(['finish', 'list', 'stop', 'update']);
@@ -136,7 +135,6 @@ const delimitedTools = new Set([
   'computer',
   'delegate',
   'browser',
-  'browser_session',
   'sign_in',
   'web_search',
   'fetch_content',
