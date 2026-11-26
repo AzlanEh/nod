@@ -621,8 +621,7 @@ export function createLedger({
                   : request.task === 'vision' ||
                       request.task === 'attention' ||
                       request.task === 'check' ||
-                      request.task === 'activity' ||
-                      request.task === 'quick-reply'
+                      request.task === 'activity'
                     ? 'agent'
                     : request.task === 'review' || request.task === 'access'
                       ? 'review'

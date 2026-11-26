@@ -85,7 +85,6 @@ import { lockKey } from './locks.ts';
 import { redactSecretText } from './redaction.ts';
 import { backgroundVisibilitySql, loadConversationLanguage } from './communication.ts';
 import { resemblesTaskAcknowledgement } from '../shared/task-ack.ts';
-import type { QuickReplyInput } from './activity.ts';
 
 const queue = 'thread-drain';
 const rasterTypes = new Set([
@@ -157,7 +156,6 @@ async function cardMap(
 
 const running = new Map<string, AbortController>();
 const inflight = new Set<Promise<void>>();
-const quickChecked = new Set<string>();
 let stopping = false;
 let nextStop = new AbortController();
 let chatStop = new AbortController();
@@ -267,7 +265,6 @@ export interface ThreadDependencies {
     input: { text: string; question?: string },
     signal: AbortSignal,
   ) => Promise<string>;
-  quickReply?: (turnId: string, input: QuickReplyInput, signal: AbortSignal) => Promise<string>;
   consumers?: WorkConsumers;
   artifacts?: ArtifactService;
   writeArtifact?: (
@@ -1935,133 +1932,6 @@ async function hasQueuedMessages(sessionId: string, channel: string) {
   );
 }
 
-async function quickReplies(
-  threadId: string,
-  write: NonNullable<ThreadDependencies['quickReply']>,
-) {
-  const { rows } = await pool.query<{
-    id: string;
-    message_id: string;
-    running_id: string;
-    running_prompt: string;
-  }>(
-    `SELECT q.id,q.message_id,r.id AS running_id,r.prompt AS running_prompt
-     FROM turns q JOIN turns r ON r.owner_id=q.owner_id AND r.thread_id=q.thread_id AND r.session_id=q.session_id
-       AND r.status='running' AND r.channel=q.channel AND NOT r.background
-     WHERE q.owner_id=$1 AND q.thread_id=$2 AND q.session_id=$2 AND q.channel='web' AND q.status='queued' AND q.source='user'
-       AND COALESCE(q.source_id,'') NOT LIKE 'reaction-reply:%'
-       AND q.message_id IS NOT NULL AND btrim(q.prompt)<>''
-       AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.owner_id=q.owner_id AND m.stream_id='quick:'||q.message_id)
-     ORDER BY q.created_at,q.id`,
-    [ownerId, threadId],
-  );
-  const queued = new Set(rows.map((row) => row.id));
-  for (const id of quickChecked) if (!queued.has(id)) quickChecked.delete(id);
-  await Promise.all(
-    rows.map(async (row) => {
-      if (quickChecked.has(row.id)) return;
-      const stop = running.get(row.running_id)?.signal;
-      if (!stop || stop.aborted) return;
-      quickChecked.add(row.id);
-      const text = (
-        await write(
-          row.running_id,
-          await quickReplyInput(threadId, row),
-          AbortSignal.any([stop, AbortSignal.timeout(15_000)]),
-        )
-      ).trim();
-      if (!text || stop.aborted) return;
-      const streamId = `quick:${row.message_id}`;
-      const posted = await transaction(
-        async (database) => {
-          await lockThread(database);
-          return withTurnLock(
-            { turnId: row.running_id, signal: stop },
-            async (client) => {
-              const open = await client.query(
-                `SELECT 1 FROM turns q
-                   WHERE q.id=$1 AND q.owner_id=$2 AND q.status='queued'
-                     AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.owner_id=q.owner_id AND m.stream_id=$3)`,
-                [row.id, ownerId, streamId],
-              );
-              if (!open.rowCount) return false;
-              await insertAssistantMessage(
-                client,
-                { threadId, turnId: row.running_id },
-                text,
-                [],
-                streamId,
-                null,
-              );
-              return true;
-            },
-            database,
-          );
-        },
-        pool,
-        stop,
-      ).catch((error) => {
-        if (
-          stop.aborted ||
-          (error instanceof Error && error.message === 'This turn is no longer active.')
-        )
-          return false;
-        throw error;
-      });
-      if (posted) refresh();
-    }),
-  );
-}
-
-async function quickReplyInput(
-  threadId: string,
-  row: { message_id: string; running_id: string; running_prompt: string },
-): Promise<QuickReplyInput> {
-  const [message, conversation, step, tasks, approvals] = await Promise.all([
-    pool.query<{ text: string }>('SELECT text FROM messages WHERE id=$1 AND owner_id=$2', [
-      row.message_id,
-      ownerId,
-    ]),
-    pool.query<{ role: string; text: string }>(
-      `SELECT role,text FROM (SELECT m.role,m.text,m.created_at,m.id FROM messages m JOIN threads th ON th.id=m.thread_id
-         WHERE m.owner_id=$1 AND m.thread_id=$2 AND m.hidden_at IS NULL AND m.approval_answer IS NULL
-           AND m.id<>$3 AND btrim(m.text)<>'' AND m.created_at>COALESCE(th.chat_restarted_at,'-infinity')
-           AND m.created_at<=(SELECT created_at FROM messages WHERE id=$3 AND owner_id=$1)
-         ORDER BY m.created_at DESC,m.id DESC LIMIT 12) m ORDER BY created_at,id`,
-      [ownerId, threadId, row.message_id],
-    ),
-    pool.query<{ summary: string }>(
-      `SELECT summary FROM turn_events WHERE turn_id=$1 AND type IN ('intent','step') AND btrim(summary)<>''
-         ORDER BY created_at DESC,id DESC LIMIT 1`,
-      [row.running_id],
-    ),
-    pool.query<{ title: string; state: string; now: string }>(
-      `SELECT title,state,now_text AS now FROM tasks WHERE owner_id=$1
-         AND (state='open' OR updated_at>now()-interval '24 hours') ORDER BY created_at DESC,id DESC LIMIT 10`,
-      [ownerId],
-    ),
-    pool.query<{ title: string; status: string }>(
-      `SELECT COALESCE(title,action) AS title,status FROM approvals
-         WHERE owner_id=$1 AND thread_id=$2 AND created_at>now()-interval '24 hours'
-         ORDER BY created_at DESC,id DESC LIMIT 10`,
-      [ownerId, threadId],
-    ),
-  ]);
-  const now = step.rows[0]?.summary;
-  return {
-    message: message.rows[0]?.text ?? '',
-    conversation: conversation.rows,
-    working: row.running_prompt,
-    ...(now ? { step: now } : {}),
-    tasks: tasks.rows.map(({ title, state, now }) => ({
-      title,
-      state,
-      ...(state === 'open' && now.trim() ? { now } : {}),
-    })),
-    approvals: approvals.rows,
-  };
-}
-
 async function drainThread(threadId: string, dependencies: ThreadDependencies) {
   if (stopping) return;
   await dependencies.taskChecks?.(threadId).catch(async (error) => {
@@ -2070,13 +1940,6 @@ async function drainThread(threadId: string, dependencies: ThreadDependencies) {
   });
   const claimed = await claimTurns(threadId);
   if (claimed.length) refresh();
-  if (dependencies.quickReply) {
-    const work = quickReplies(threadId, dependencies.quickReply).catch((error) =>
-      logFailure('quick_reply_failed', error, { threadId }),
-    );
-    inflight.add(work);
-    void work.finally(() => inflight.delete(work));
-  }
   for (const turn of claimed) {
     const execute = () => executeTurn(turn, dependencies);
     const work = (

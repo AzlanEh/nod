@@ -20,7 +20,6 @@ export interface MemoryCurator {
         | 'vision'
         | 'classify'
         | 'activity'
-        | 'quick-reply'
         | 'attention'
         | 'check';
       instructions: string;

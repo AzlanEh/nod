@@ -119,7 +119,6 @@ const usageOperations = [
   'ideas',
   'brief',
   'activity',
-  'quick-reply',
   'check',
   'classify',
   'vision',
