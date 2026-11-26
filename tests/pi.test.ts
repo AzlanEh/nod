@@ -4108,7 +4108,17 @@ test('send_message validates structured visuals and delivers each distinct prese
             assert.equal(replies.length, 0);
             await send.execute({
               text: '',
-              presentation: { ...items, pick, items: [1, 2].map(row) },
+              presentation: {
+                ...items,
+                pick,
+                items: [1, 2].map(row),
+                note: 'a'.repeat(250),
+                sources: [
+                  { label: 'Public', url: 'https://news.ycombinator.com/item?id=1' },
+                  { label: 'Local', url: 'http://localhost:3000/tasks' },
+                  { label: 'Relative', url: '/tasks' },
+                ],
+              },
             });
           },
         }),
@@ -4127,6 +4137,10 @@ test('send_message validates structured visuals and delivers each distinct prese
     });
     assert.equal(replies.length, 1);
     assert.equal(replies[0][3]?.type, 'items');
+    assert.equal(replies[0][3]?.note?.length, 220);
+    assert.deepEqual(replies[0][3]?.sources, [
+      { label: 'Public', url: 'https://news.ycombinator.com/item?id=1' },
+    ]);
     assert.equal(result.status, 'waiting_user');
     assert.equal(result.message, 'Which one?');
     assert.deepEqual(

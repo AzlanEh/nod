@@ -226,26 +226,39 @@ export async function loadConversationLanguage(
   ownerId: string,
   threadId: string,
   owner?: { text: string; created_at: Date | string },
+  background?: { turnId: string; sessionId: string },
 ) {
   const receipts = owner
     ? undefined
     : (await pool.query("SELECT to_regclass('chat_verification_submissions') AS name")).rows[0]
         ?.name;
+  const boundaryFilter = background
+    ? `AND m.created_at <= (SELECT created_at FROM turns WHERE owner_id=$1 AND thread_id=$2 AND id=$3)
+       AND (u.id IS NULL OR u.session_id=$4
+         OR (u.status IN ('succeeded','failed','cancelled')
+             AND u.finished_at <= (SELECT created_at FROM turns WHERE owner_id=$1 AND thread_id=$2 AND id=$3)))`
+    : '';
   const latest = (
     await pool.query<{ owner: LanguageRow; nod: LanguageRow }>(
       `SELECT ${
         owner
           ? 'NULL::json'
           : `(SELECT json_build_object('text',m.text,'created_at',m.created_at) FROM messages m
+         LEFT JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id
          WHERE m.owner_id=$1 AND m.thread_id=$2 AND m.role='user' AND m.text<>'' AND m.hidden_at IS NULL
            AND m.approval_answer IS NULL AND NOT ${withdrawnSql('m')}
            ${receipts ? 'AND NOT EXISTS (SELECT 1 FROM chat_verification_submissions v WHERE v.message_id=m.id)' : ''}
+           ${boundaryFilter}
          ORDER BY m.created_at DESC,m.id DESC LIMIT 1)`
       } AS owner,
-        (SELECT json_build_object('text',text,'created_at',created_at) FROM messages
-         WHERE owner_id=$1 AND thread_id=$2 AND role='assistant' AND text<>'' AND hidden_at IS NULL
-         ORDER BY created_at DESC,id DESC LIMIT 1) AS nod`,
-      [ownerId, threadId],
+        (SELECT json_build_object('text',m.text,'created_at',m.created_at) FROM messages m
+         LEFT JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id
+         WHERE m.owner_id=$1 AND m.thread_id=$2 AND m.role='assistant' AND m.text<>'' AND m.hidden_at IS NULL
+           ${boundaryFilter}
+         ORDER BY m.created_at DESC,m.id DESC LIMIT 1) AS nod`,
+      background
+        ? [ownerId, threadId, background.turnId, background.sessionId]
+        : [ownerId, threadId],
     )
   ).rows[0];
   const sample = {

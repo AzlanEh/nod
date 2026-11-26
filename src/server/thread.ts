@@ -108,6 +108,20 @@ export const stopSignal = () => {
   return signal;
 };
 
+const burstCoalesceMs = (() => {
+  const raw = process.env.NOD_BURST_COALESCE_MS;
+  if (raw !== undefined) {
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed) && parsed >= 0) return Math.min(parsed, 5000);
+  }
+  return process.env.NODE_ENV === 'test' ||
+    process.env.NODE_TEST_CONTEXT !== undefined ||
+    process.execArgv.includes('--test') ||
+    process.argv.some((arg) => /(?:^|\/)tests\//.test(arg) || arg.endsWith('.test.ts'))
+    ? 0
+    : 900;
+})();
+
 export type TurnSource = 'user' | 'schedule' | 'event' | 'resume' | 'task';
 export const ownerStarted = (turn = 'u') => `${turn}.source IN ('user','task','resume')`;
 export interface TurnRef {
@@ -924,9 +938,19 @@ export async function submitUserMessage(
           )
         ).rows[0]
       : undefined;
+    const sessionId = question?.session_id ?? thread.id;
+    const coalesce =
+      live &&
+      burstCoalesceMs > 0 &&
+      !question &&
+      !options.questionAnswer &&
+      !options.approvalAnswer &&
+      sessionId === thread.id &&
+      !String(options.sourceId ?? '').startsWith('reaction-reply:');
+    const startAfter = coalesce ? new Date(Date.now() + burstCoalesceMs) : null;
     await client.query(
-      `INSERT INTO turns(id,owner_id,thread_id,source,source_id,message_id,prompt,channel,session_id,background,parent_turn_id,status,finished_at,withdrawn)
-       VALUES($1,$2,$3,'user',$4,$5,$6,$7,$8,$9,$10,$11,CASE WHEN $11='cancelled' THEN now() END,$11='cancelled')`,
+      `INSERT INTO turns(id,owner_id,thread_id,source,source_id,message_id,prompt,channel,session_id,background,parent_turn_id,status,finished_at,withdrawn,start_after)
+       VALUES($1,$2,$3,'user',$4,$5,$6,$7,$8,$9,$10,$11,CASE WHEN $11='cancelled' THEN now() END,$11='cancelled',$12)`,
       [
         turnId,
         ownerId,
@@ -935,14 +959,15 @@ export async function submitUserMessage(
         messageId,
         options.prompt ?? text,
         channel,
-        question?.session_id ?? thread.id,
+        sessionId,
         question?.background ?? false,
         question?.id ?? null,
         live ? 'queued' : 'cancelled',
+        startAfter,
       ],
     );
     if (taskTarget) await taskTarget.record(turnId);
-    if (live) await confirmAction?.close(client, question?.session_id ?? thread.id, turnId);
+    if (live) await confirmAction?.close(client, sessionId, turnId);
     const prepared = (await options.prepareAttachments?.(client, thread.id)) ?? [];
     await client.query(
       "INSERT INTO messages(id,owner_id,role,text,display_text,thread_id,turn_id,attachments,reply_to_message_id,reply_quote,audio_caption,question_answer) VALUES($1,$2,'user',$3,$4,$5,$6,$7,$8,$9,$10,$11)",
@@ -960,7 +985,7 @@ export async function submitUserMessage(
         options.questionAnswer ? JSON.stringify(options.questionAnswer) : null,
       ],
     );
-    if (live) await sendDrain(client, thread.id);
+    if (live) await sendDrain(client, thread.id, startAfter ?? undefined);
     markInserted();
     return { threadId: thread.id, turnId, messageId };
   };
@@ -2106,7 +2131,13 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
           [threadId, ownerId],
         )
       : undefined,
-    loadConversationLanguage(pool, ownerId, threadId),
+    loadConversationLanguage(
+      pool,
+      ownerId,
+      threadId,
+      undefined,
+      turn.background ? { turnId: turn.id, sessionId: turn.session_id } : undefined,
+    ),
     pool.query<{ title: string; status: string; createdAt: Date }>(
       `SELECT COALESCE(title,action) AS title,status,created_at AS "createdAt" FROM approvals
          WHERE owner_id=$1 AND thread_id=$2 AND created_at>now()-interval '24 hours'
@@ -2476,6 +2507,30 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
     const proactivity = await dependencies.proactivity?.(ref, signal);
     sourceMessageId = loaded.sourceMessageId;
     if (sourceMessageId) ownerMessageIds.push(sourceMessageId);
+    let initialPrompt = String(turn.prompt ?? '');
+    if (
+      burstCoalesceMs > 0 &&
+      turn.source === 'user' &&
+      !turn.background &&
+      turn.session_id === threadId
+    ) {
+      const extra = await takeQueuedMessages(turnId, turn.session_id, turn.channel);
+      if (extra.length) {
+        sourceMessageId = extra.at(-1)!.id;
+        ownerMessageIds.push(...extra.map((message) => message.id));
+        const lines = [initialPrompt, ...extra.map((message) => message.text)].filter((part) =>
+          part.trim(),
+        );
+        initialPrompt = lines.join('\n');
+        for (const message of extra) {
+          const loadedExtra = await loadMessage(message.id);
+          loaded.uploads.push(...loadedExtra.uploads);
+          loaded.inputAttachments.push(...loadedExtra.inputAttachments);
+          loaded.voice ||= loadedExtra.voice;
+        }
+        refresh();
+      }
+    }
     let voice = loaded.voice;
     let ownerMessage = turn.source === 'user';
     const stagedFiles = new Map<string, string>();
@@ -2620,7 +2675,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
       turnId,
       sessionId: turn.session_id,
       resumed: turn.source === 'resume' || Boolean(turn.parent_turn_id),
-      prompt: turn.prompt,
+      prompt: initialPrompt,
       background: turn.background,
       ...(scheduleCache ? { scheduleCache } : {}),
       ...(routed ? { model: routed.selection } : {}),

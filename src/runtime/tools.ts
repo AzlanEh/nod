@@ -17,6 +17,7 @@ import {
   presentationSchema,
   type Presentation,
 } from '../shared/presentation.ts';
+import { previewableUrl } from '../shared/link-preview.ts';
 import { proactiveUpdateSchema, sourceReadSchema } from '../shared/proactivity.ts';
 import { Value } from '@sinclair/typebox/value';
 import {
@@ -266,14 +267,29 @@ const flightReferences = z.looseObject({
     .min(1)
     .max(8),
 });
-const withPresentationDefaults = (value: unknown) =>
-  value && typeof value === 'object' && !Array.isArray(value) && !('sources' in value)
-    ? { ...(value as Record<string, unknown>), sources: [] }
-    : value;
+const normalizePresentationInput = (value: unknown) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  const record = { ...(value as Record<string, unknown>) };
+  if (!('sources' in record)) record.sources = [];
+  else if (Array.isArray(record.sources)) {
+    record.sources = record.sources.filter(
+      (entry) =>
+        entry &&
+        typeof entry === 'object' &&
+        typeof (entry as { url?: unknown }).url === 'string' &&
+        Boolean(previewableUrl((entry as { url: string }).url)?.startsWith('https://')),
+    );
+  }
+  if (typeof record.status === 'string' && record.status.trim())
+    record.status = { label: record.status.trim().slice(0, 40), tone: 'new' };
+  if (typeof record.note === 'string' && record.note.length > 220)
+    record.note = `${record.note.slice(0, 219).trimEnd()}…`;
+  return record;
+};
 TypeRegistry.Set(
   'NodPresentation',
   (_schema, value) =>
-    presentationInputSchema.safeParse(withPresentationDefaults(value)).success ||
+    presentationInputSchema.safeParse(normalizePresentationInput(value)).success ||
     flightReferences.safeParse(value).success,
 );
 const { $schema, ...presentationJsonSchema } = z.toJSONSchema(presentationInputSchema, {
@@ -1253,7 +1269,7 @@ export function nodTools(
       const visual =
         p.presentation === undefined
           ? undefined
-          : presentationInputSchema.parse(withPresentationDefaults(withFlights(p.presentation)));
+          : presentationInputSchema.parse(normalizePresentationInput(withFlights(p.presentation)));
       if (!p.text.trim() && !visual) throw new Error('A text answer or visual is required.');
       const pick = visual && presentationPick(visual);
       if (pick && p.intent === 'final')
