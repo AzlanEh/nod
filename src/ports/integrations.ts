@@ -11,6 +11,7 @@ export interface IntegrationConnectionBrowser {
       origin: string,
       native?: { returnPath: string },
     ) => Promise<string>,
+    app?: string,
   ): Promise<string>;
   owns(url: string): boolean;
   remote(url: string): string | undefined;
