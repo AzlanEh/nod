@@ -532,7 +532,7 @@ function Connected({ c, onReconnect }: { c: Connect; onReconnect: () => void }) 
           <span className="ob-brain-model-label">{choosing ? 'Model' : 'Using'}</span>
           <ModelPicker manageConnections={false} surface="onboarding" />
           {c.data?.selection?.connectionId === source.id &&
-            c.data.selection.modelId === recommendedModel(source)?.id && (
+            c.data.selection.modelId === c.recommendation?.id && (
               <span className="model-option-recommended">Recommended</span>
             )}
         </div>
