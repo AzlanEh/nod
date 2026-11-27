@@ -1020,9 +1020,10 @@ export function nodTools(
   };
   const { browserId } = turn.execution;
   const { signal } = context;
-  const screenshot = async () => {
-    const bytes = await computer.screenshot(browserId, signal);
-    signal.throwIfAborted();
+  const screenshot = async (overrideSignal?: AbortSignal) => {
+    const activeSignal = overrideSignal ?? signal;
+    const bytes = await computer.screenshot(browserId, activeSignal);
+    activeSignal.throwIfAborted();
     if (bytes && computer.screenStatus && computer.screenStatus(browserId).state !== 'live')
       throw new Error(
         'A live browser screenshot is unavailable. Reopen the page and take a fresh screenshot before continuing. Do not repeat an action whose result is uncertain.',
@@ -1068,7 +1069,9 @@ export function nodTools(
     recordObservation(step, page, choice);
     if (step.action === 'evaluate' || step.action === 'tab_list')
       return `URL: ${page.url}\n${page.text}`;
-    return differ.format(page.url, page.text, { full: Boolean(step.full) });
+    return differ.format(page.url, page.text, {
+      full: Boolean(step.full) || step.action === 'snapshot',
+    });
   };
   const check = async (
     step: BrowserStep['step'],
@@ -1129,10 +1132,12 @@ export function nodTools(
   const act = async (
     step: BrowserAction,
     started?: () => void,
+    options?: { observe?: boolean; signal?: AbortSignal },
   ): Promise<{ page: BrowserObservation; choice?: string } | { output: unknown }> => {
+    const activeSignal = options?.signal ?? signal;
     if (step.action === 'evaluate' && context.browserStep)
       try {
-        return { page: await computer.act(browserId, { ...step, readOnly: true }, signal) };
+        return { page: await computer.act(browserId, { ...step, readOnly: true }, activeSignal) };
       } catch (error) {
         if (!(error instanceof BrowserActionError && error.code === 'browser_script_writes'))
           throw error;
@@ -1140,7 +1145,20 @@ export function nodTools(
     const checked = commits(step) ? await check(step) : { binding: {} };
     if ('output' in checked) return { output: checked.output };
     started?.();
-    const page = await computer.act(browserId, { ...step, ...checked.binding }, signal);
+    const shouldSkipObserve =
+      options?.observe === false &&
+      step.action !== 'snapshot' &&
+      step.action !== 'evaluate' &&
+      step.action !== 'tab_list';
+    const page = await computer.act(
+      browserId,
+      {
+        ...step,
+        ...checked.binding,
+        ...(shouldSkipObserve ? { observe: false } : {}),
+      },
+      activeSignal,
+    );
     if ('record' in checked) await checked.record?.();
     return { page, choice: checked.choice };
   };
@@ -1411,7 +1429,7 @@ export function nodTools(
         act,
         record: recordObservation,
         format: (page, full) => differ.format(page.url, page.text, { full }),
-        screenshot: async () => (await screenshot()) ?? undefined,
+        screenshot: async (overrideSignal) => (await screenshot(overrideSignal)) ?? undefined,
       }),
     ),
     bind(toolDefinitions.sign_in, async ({ message, action, ...request }) => {

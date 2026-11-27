@@ -23,14 +23,15 @@ export function runBrowserBridge(options: {
       if (ended) return;
       ended = true;
       options.input.removeListener('data', incoming);
-      options.input.removeListener('end', disconnected);
-      options.input.removeListener('error', disconnected);
-      options.input.removeListener('close', disconnected);
-      options.output.removeListener('error', disconnected);
+      options.input.removeListener('end', inputEnded);
+      options.input.removeListener('error', errored);
+      options.input.removeListener('close', inputEnded);
+      options.output.removeListener('error', errored);
       socket.destroy();
       resolve(code);
     };
-    const disconnected = () => finish(multiplex ? 0 : 1);
+    const inputEnded = () => finish(multiplex ? 0 : 1);
+    const errored = () => finish(1);
     const incoming = (chunk: Buffer | string) => {
       input += chunk.toString();
       for (let line = input.indexOf('\n'); line >= 0; line = input.indexOf('\n')) {
@@ -65,12 +66,12 @@ export function runBrowserBridge(options: {
         options.output.once('drain', () => socket.resume());
       }
     });
-    socket.on('end', () => finish(output ? 0 : 1));
+    socket.on('end', () => finish(!multiplex && output ? 0 : 1));
     options.input.on('data', incoming);
-    options.input.on('end', disconnected);
-    options.input.on('error', disconnected);
-    options.input.on('close', disconnected);
-    options.output.on('error', disconnected);
+    options.input.on('end', inputEnded);
+    options.input.on('error', errored);
+    options.input.on('close', inputEnded);
+    options.output.on('error', errored);
   });
 }
 

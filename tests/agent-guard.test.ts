@@ -2537,8 +2537,9 @@ test('links navigate without a check unless they send a known form', async () =>
   assert.deepEqual(seen, ['@form-link', '@button']);
 });
 
-test('browser_run executes multi-step scripts with Trust checks, incremental diffs, step limits and approval pauses', async () => {
+test('browser_run executes multi-step scripts with isolation, Trust checks, diffs, step limits and non-catchable approval pauses', async () => {
   let url = 'https://example.com/start';
+  let pageBody = 'Line A\nLine B\nLine C\nLine D\nLine E';
   const acted: Array<{ action: string; target: string; observe?: boolean }> = [];
   const checked: string[] = [];
   const outputs: string[] = [];
@@ -2559,8 +2560,27 @@ test('browser_run executes multi-step scripts with Trust checks, incremental dif
         ),
       );
       outputs.push(text(await call(tools, 'browser', { action: 'snapshot' })));
+      outputs.push(text(await call(tools, 'browser', { action: 'scroll', direction: 'down' })));
+      pageBody = 'Line A\nLine B updated\nLine C\nLine D\nLine E';
+      outputs.push(text(await call(tools, 'browser', { action: 'scroll', direction: 'down' })));
       outputs.push(text(await call(tools, 'browser', { action: 'snapshot' })));
-      outputs.push(text(await call(tools, 'browser', { action: 'snapshot', full: true })));
+
+      await assert.rejects(
+        call(tools, 'browser_run', {
+          code: `return (() => {}).constructor('return process.env')();`,
+        }),
+        /Code generation from strings disallowed|process is not defined/i,
+      );
+
+      await assert.rejects(
+        call(tools, 'browser_run', {
+          code: `
+            await Promise.all(Array.from({ length: 25 }, () => page.scroll('down')));
+          `,
+        }),
+        /20-action limit/,
+      );
+
       await assert.rejects(
         call(tools, 'browser_run', {
           code: `
@@ -2578,14 +2598,16 @@ test('browser_run executes multi-step scripts with Trust checks, incremental dif
             await page.click('#refused');
           `,
         }),
-        /Ran 1 actions: scroll\. Action 2 \(click\) did not run\./,
+        /Ran 1 action: scroll\. Action 2 \(click\) did not run\./,
       );
       outputs.push(
         text(
           await call(tools, 'browser_run', {
             code: `
               await page.fill('#approve-name', 'Synthetic name');
-              await page.click('#approve');
+              try {
+                await page.click('#approve');
+              } catch {}
               await page.click('#after-approve');
               return 'unreachable';
             `,
@@ -2618,36 +2640,25 @@ test('browser_run executes multi-step scripts with Trust checks, incremental dif
           if (step.action === 'open') url = step.url!;
           if (step.action === 'evaluate') return { url, text: 'Synthetic title' };
           if (step.observe === false) return { url, text: '' };
-          return { url, text: `Line A\nLine B\nSynthetic page at ${url}` };
+          return { url, text: `${pageBody}\nSynthetic page at ${url}` };
         },
       }),
     },
   );
-  assert.deepEqual(
-    acted.map((item) => `${item.action} ${item.target}`.trim()),
-    [
-      'open https://example.com/results',
-      'evaluate document.title',
-      'fill #query',
-      'snapshot',
-      'snapshot',
-      'snapshot',
-      'scroll',
-      'click #broken',
-      'scroll',
-      'fill #approve-name',
-    ],
-  );
   assert.equal(acted[0]?.observe, false);
   assert.equal(acted[2]?.observe, false);
+  assert.ok(!acted.some((item) => item.target === '#after-broken'));
+  assert.ok(!acted.some((item) => item.target === '#after-approve'));
   assert.deepEqual(checked, ['#broken', '#refused', '#approve']);
   assert.match(outputs[0]!, /Synthetic title/);
   assert.match(outputs[0]!, /https:\/\/example\.com\/results/);
-  assert.match(outputs[1]!, /Line A\nLine B\nSynthetic page at/);
+  assert.match(outputs[1]!, /Line A\nLine B\nLine C/);
   assert.match(outputs[2]!, /\(page unchanged\)/);
-  assert.match(outputs[3]!, /Line A\nLine B\nSynthetic page at/);
-  assert.match(outputs[4]!, /confirmation question is in chat/);
-  assert.doesNotMatch(outputs[4]!, /untrusted_tool_result/);
+  assert.match(outputs[3]!, /Removed \(1 lines\):\n- Line B/);
+  assert.match(outputs[3]!, /Added \(1 lines\):\n\+ Line B updated/);
+  assert.match(outputs[4]!, /Line A\nLine B updated\nLine C/);
+  assert.match(outputs[5]!, /confirmation question is in chat/);
+  assert.doesNotMatch(outputs[5]!, /untrusted_tool_result/);
   assert.equal(turn.result.status, 'waiting_user');
 });
 

@@ -3,6 +3,7 @@ import {
   type BrowserErrorCode,
   type BrowserSignInGuard,
 } from '../../shared/browser-errors.ts';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { z } from 'zod';
@@ -90,6 +91,7 @@ export function createBridgeComputer(options: {
       exit?: { exitCode: number | null; signal: string | null },
     ): void;
   };
+  let persistentDisabled = false;
   let persistent:
     | {
         child: CommandProcess;
@@ -97,6 +99,7 @@ export function createBridgeComputer(options: {
         stderr: string;
         output: string;
         closed: boolean;
+        responded: boolean;
       }
     | undefined;
 
@@ -120,6 +123,7 @@ export function createBridgeComputer(options: {
   }
 
   function ensurePersistent() {
+    if (persistentDisabled) return undefined;
     if (persistent && !persistent.closed) return persistent;
     if (!options.launchPersistent) return undefined;
     const child = options.launchPersistent();
@@ -129,6 +133,7 @@ export function createBridgeComputer(options: {
       stderr: '',
       output: '',
       closed: false,
+      responded: false,
     };
     persistent = channel;
     child.stdin.on('error', (error) => {
@@ -156,6 +161,7 @@ export function createBridgeComputer(options: {
           const value = JSON.parse(line);
           const part = chunkFrame.safeParse(value);
           if (part.success) {
+            channel.responded = true;
             const entry = channel.entries.get(part.data.id);
             if (!entry || !entry.chunks) throw new Error();
             const bytes = Buffer.from(part.data.chunk, 'base64');
@@ -165,6 +171,7 @@ export function createBridgeComputer(options: {
             continue;
           }
           const response = browserResponse.parse(value);
+          channel.responded = true;
           const entry = channel.entries.get(response.id);
           if (!entry) continue;
           channel.entries.delete(response.id);
@@ -177,8 +184,10 @@ export function createBridgeComputer(options: {
       if (Buffer.byteLength(channel.output) > responseBytes) dropPersistent('oversized_response');
     });
     child.on('close', (code, signal) => {
-      if (persistent === channel)
+      if (persistent === channel) {
+        if (!channel.responded) persistentDisabled = true;
         dropPersistent('exit', undefined, { exitCode: code, signal: signal ?? null });
+      }
     });
     return channel;
   }
@@ -333,7 +342,8 @@ export function createBridgeComputer(options: {
         ),
       );
     };
-    const usePersistent = Boolean(options.launchPersistent) && input.method !== 'dispose';
+    const usePersistent =
+      Boolean(options.launchPersistent) && !persistentDisabled && input.method !== 'dispose';
     const result = new Promise<unknown>((resolve, reject) => {
       if (usePersistent) {
         let channel: NonNullable<typeof persistent>;
@@ -366,6 +376,13 @@ export function createBridgeComputer(options: {
           exit?: { exitCode: number | null; signal: string | null },
         ) => {
           if (settled) return;
+          if (!channel.responded && !cancelling && reason === 'exit') {
+            settled = true;
+            persistentDisabled = true;
+            cleanup();
+            void call(input, signal, transfer, recovery).then(resolve, reject);
+            return;
+          }
           settled = true;
           uncertain = true;
           stderr = channel.stderr;
@@ -393,17 +410,20 @@ export function createBridgeComputer(options: {
         }
         signal?.addEventListener('abort', cancel, { once: true });
         cancellations.set(cancel, browserId);
+        const runInContext = AsyncLocalStorage.snapshot();
         channel.entries.set(request.id, {
           order,
           chunks: transfer.chunks,
           received: 0,
-          onResponse: (response) => {
-            if (settled) return;
-            settled = true;
-            cleanup();
-            settleResponse(response, cancelling, resolve, reject);
-          },
-          onUnavailable: unavailable,
+          onResponse: (response) =>
+            runInContext(() => {
+              if (settled) return;
+              settled = true;
+              cleanup();
+              settleResponse(response, cancelling, resolve, reject);
+            }),
+          onUnavailable: (reason, error, exit) =>
+            runInContext(() => unavailable(reason, error, exit)),
         });
         void (async () => {
           if (!channel.child.stdin.write(encoded)) await once(channel.child.stdin, 'drain');

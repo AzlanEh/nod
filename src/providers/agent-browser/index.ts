@@ -69,10 +69,18 @@ interface BrowserState {
     cdpUrl: string;
     targetId: string;
     client: Awaited<ReturnType<typeof openDevtools>>;
+    refs: number;
+    retired: boolean;
   };
+  devtoolsOpening?: Promise<{
+    cdpUrl: string;
+    targetId: string;
+    client: Awaited<ReturnType<typeof openDevtools>>;
+    refs: number;
+    retired: boolean;
+  }>;
   seenTabs: Set<string>;
   started: boolean;
-  lastActiveAt?: number;
   busy: number;
   closed: boolean;
   closing: boolean;
@@ -448,8 +456,12 @@ export function createAgentBrowserComputer(options: {
   }
 
   function dropInspector(state: BrowserState) {
-    state.devtools?.client.close();
+    const cached = state.devtools;
     delete state.devtools;
+    delete state.devtoolsOpening;
+    if (!cached) return;
+    cached.retired = true;
+    if (cached.refs <= 0) cached.client.close();
   }
 
   function forgetTabs(state: BrowserState) {
@@ -737,8 +749,6 @@ export function createAgentBrowserComputer(options: {
           if (Date.now() - started > 5000) throw new Error('The previous browser did not stop.');
           await delay(50);
         }
-      } else {
-        state.lastActiveAt = Date.now();
       }
       return result;
     }
@@ -1065,8 +1075,7 @@ export function createAgentBrowserComputer(options: {
   async function alive(state: BrowserState) {
     if (!state.socket || state.browser !== owner.cdpUrl) return false;
     if (state.root && owner.watch?.open() && !owner.watch.tabs(state.root).length) return false;
-    if (state.lastActiveAt && Date.now() - state.lastActiveAt < 10_000) return true;
-    const ok = await requestDaemon(
+    return requestDaemon(
       state.socket,
       { action: 'dialog', response: 'status' },
       undefined,
@@ -1075,8 +1084,6 @@ export function createAgentBrowserComputer(options: {
       () => true,
       (error: unknown) => !(error instanceof DaemonTransportError),
     );
-    if (ok) state.lastActiveAt = Date.now();
-    return ok;
   }
 
   async function reopen(id: string, signal?: AbortSignal) {
@@ -1742,20 +1749,64 @@ export function createAgentBrowserComputer(options: {
   }
 
   async function inspector(state: BrowserState, signal?: AbortSignal) {
+    const lease = (entry: NonNullable<BrowserState['devtools']>) => {
+      entry.refs++;
+      let released = false;
+      return Object.assign(Object.create(entry.client), {
+        close() {
+          if (released) return;
+          released = true;
+          entry.refs--;
+          if (entry.retired && entry.refs <= 0) entry.client.close();
+        },
+      }) as Awaited<ReturnType<typeof openDevtools>>;
+    };
+    const matches = (entry: NonNullable<BrowserState['devtools']>) =>
+      !entry.retired &&
+      entry.client.open() &&
+      (!owner.cdpUrl || entry.cdpUrl === owner.cdpUrl) &&
+      (!state.targetId || entry.targetId === state.targetId);
+
     if (!signal) {
-      const cached = state.devtools;
-      if (
-        cached &&
-        cached.client.open() &&
-        (!owner.cdpUrl || cached.cdpUrl === owner.cdpUrl) &&
-        (!state.targetId || cached.targetId === state.targetId)
-      ) {
-        return Object.assign(Object.create(cached.client), { close() {} }) as Awaited<
-          ReturnType<typeof openDevtools>
-        >;
+      if (state.devtools && matches(state.devtools)) return lease(state.devtools);
+      if (state.devtoolsOpening) {
+        const opening = await state.devtoolsOpening.catch(() => undefined);
+        if (opening && matches(opening)) return lease(opening);
+      }
+      dropInspector(state);
+      const opening = (async () => {
+        const { cdpUrl } = z
+          .object({ cdpUrl: z.string() })
+          .passthrough()
+          .parse(await command(state, { action: 'cdp_url' }));
+        let targetId = state.targetId;
+        if (!targetId) {
+          const tabs = z
+            .array(z.object({ active: z.boolean(), targetId: z.string() }).passthrough())
+            .parse((await command(state, { action: 'tab_list' })).tabs);
+          const tab = tabs.find((item) => item.active);
+          if (!tab) throw new Error('The checkout tab is no longer open.');
+          targetId = tab.targetId;
+        }
+        const client = await openDevtools(cdpUrl, targetId, undefined, options.clickReceiptMs);
+        return { cdpUrl, targetId, client, refs: 0, retired: false };
+      })();
+      state.devtoolsOpening = opening;
+      try {
+        const entry = await opening;
+        if (state.devtoolsOpening === opening) {
+          delete state.devtoolsOpening;
+          state.devtools = entry;
+          return lease(entry);
+        }
+        entry.retired = true;
+        return lease(entry);
+      } catch (error) {
+        if (state.devtoolsOpening === opening) delete state.devtoolsOpening;
+        throw error;
       }
     }
-    if (!signal) dropInspector(state);
+
     const { cdpUrl } = z
       .object({ cdpUrl: z.string() })
       .passthrough()
@@ -1769,12 +1820,7 @@ export function createAgentBrowserComputer(options: {
       if (!tab) throw new Error('The checkout tab is no longer open.');
       targetId = tab.targetId;
     }
-    const client = await openDevtools(cdpUrl, targetId, signal, options.clickReceiptMs);
-    if (signal) return client;
-    state.devtools = { cdpUrl, targetId, client };
-    return Object.assign(Object.create(client), { close() {} }) as Awaited<
-      ReturnType<typeof openDevtools>
-    >;
+    return openDevtools(cdpUrl, targetId, signal, options.clickReceiptMs);
   }
 
   async function focusField(

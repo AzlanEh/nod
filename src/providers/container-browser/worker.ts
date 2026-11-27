@@ -237,9 +237,14 @@ export async function startContainerBrowserWorker(
         .then(async () => {
           if (socket.destroyed) return;
           if (!socket.write(line))
-            await new Promise((resolve) => {
-              socket.once('drain', resolve);
-              socket.once('close', resolve);
+            await new Promise<void>((resolve) => {
+              const done = () => {
+                socket.removeListener('drain', done);
+                socket.removeListener('close', done);
+                resolve();
+              };
+              socket.once('drain', done);
+              socket.once('close', done);
             });
         })
         .catch(() => {});

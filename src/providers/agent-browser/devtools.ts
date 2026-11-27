@@ -391,11 +391,13 @@ export async function openDevtools(
             } else if (shadows === 'document')
               await evaluate(session, context, 'globalThis.__nodRoots = [];', frame.id);
           }
+          const value = await evaluate(session, context, expression, frame.id);
+          const currentContext = worlds.get(`${session}:${frame.id}`) ?? context;
           results.push({
             origin: frame.securityOrigin ?? '',
             session,
-            context,
-            value: await evaluate(session, context, expression, frame.id),
+            context: currentContext,
+            value,
           });
         } catch (error) {
           worlds.delete(`${session}:${frame.id}`);

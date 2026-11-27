@@ -1,20 +1,9 @@
-const maxLines = 1600;
-const maxLineChars = 400;
 const diffBudgetRatio = 0.65;
+const maxLcsProduct = 200_000;
 
 export interface PageSnapshotState {
   url: string;
   lines: string[];
-}
-
-function splitLines(text: string): string[] {
-  const raw = text.split('\n');
-  const out: string[] = [];
-  for (let i = 0; i < raw.length && out.length < maxLines; i++) {
-    const line = raw[i]!;
-    out.push(line.length > maxLineChars ? `${line.slice(0, maxLineChars)}…` : line);
-  }
-  return out;
 }
 
 function sameDocument(a: string, b: string): boolean {
@@ -26,6 +15,51 @@ function sameDocument(a: string, b: string): boolean {
   } catch {
     return false;
   }
+}
+
+function lcsDiff(
+  oldMid: string[],
+  newMid: string[],
+): { removed: string[]; added: string[] } | null {
+  const m = oldMid.length;
+  const n = newMid.length;
+  if (m * n > maxLcsProduct) return null;
+
+  const width = n + 1;
+  const dp = new Uint32Array((m + 1) * width);
+  for (let i = m - 1; i >= 0; i--) {
+    const row = i * width;
+    const nextRow = (i + 1) * width;
+    for (let j = n - 1; j >= 0; j--) {
+      if (oldMid[i] === newMid[j]) {
+        dp[row + j] = dp[nextRow + j + 1]! + 1;
+      } else {
+        const down = dp[nextRow + j]!;
+        const right = dp[row + j + 1]!;
+        dp[row + j] = down >= right ? down : right;
+      }
+    }
+  }
+
+  const removed: string[] = [];
+  const added: string[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < m && j < n) {
+    if (oldMid[i] === newMid[j]) {
+      i++;
+      j++;
+    } else if (dp[(i + 1) * width + j]! >= dp[i * width + (j + 1)]!) {
+      removed.push(oldMid[i]!);
+      i++;
+    } else {
+      added.push(newMid[j]!);
+      j++;
+    }
+  }
+  while (i < m) removed.push(oldMid[i++]!);
+  while (j < n) added.push(newMid[j++]!);
+  return { removed, added };
 }
 
 function computeLineDiff(prev: string[], next: string[]): string | null {
@@ -46,18 +80,10 @@ function computeLineDiff(prev: string[], next: string[]): string | null {
   const oldMid = prev.slice(prefix, prev.length - suffix);
   const newMid = next.slice(prefix, next.length - suffix);
 
-  const oldSet = new Set(oldMid);
-  const newSet = new Set(newMid);
+  const lcs = lcsDiff(oldMid, newMid);
+  if (!lcs) return null;
 
-  const removed: string[] = [];
-  const added: string[] = [];
-  for (const line of oldMid) {
-    if (!newSet.has(line)) removed.push(line);
-  }
-  for (const line of newMid) {
-    if (!oldSet.has(line)) added.push(line);
-  }
-
+  const { removed, added } = lcs;
   if (removed.length === 0 && added.length === 0) return '';
 
   const diffSize = removed.length + added.length;
@@ -82,8 +108,8 @@ export function createPageDiffer() {
     reset() {
       last = undefined;
     },
-    format(url: string, text: string, options?: { full?: boolean; headerPrefix?: string }): string {
-      const lines = splitLines(text);
+    format(url: string, text: string, options?: { full?: boolean }): string {
+      const lines = text.split('\n');
       const prev = last;
       last = { url, lines };
 
