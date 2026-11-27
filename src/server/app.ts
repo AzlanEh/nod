@@ -82,8 +82,6 @@ const messageFields = `m.id,m.role,m.text,CASE WHEN m.role='user' THEN m.display
      AND u.status='failed' AND u.outside_action_at IS NULL
      AND NOT EXISTS (SELECT 1 FROM approvals a WHERE a.owner_id=u.owner_id AND (a.turn_id=u.id OR a.execution_turn_id=u.id)
        AND a.status IN ('confirmed','executing','uncertain','completed'))
-     AND NOT EXISTS (SELECT 1 FROM app_actions aa WHERE aa.owner_id=u.owner_id AND aa.turn_id=u.id
-       AND aa.status IN ('executing','completed','uncertain'))
  )) AS "retryable",
  CASE WHEN m.role='assistant' THEN (SELECT json_build_object('id',a.id,'status',a.status,'action',a.action,'title',a.title,'decline',a.decline,'cardQuestion',a.card_question,'args',a.args,'failure',CASE WHEN a.status IN ('expired','uncertain') AND jsonb_typeof(a.result->'error')='string' THEN a.result->>'error' END,'active',u.status IN ('running','waiting'),'executionActive',e.status IN ('queued','running','waiting')) FROM approvals a
    JOIN turns u ON u.id=a.turn_id AND u.owner_id=a.owner_id LEFT JOIN turns e ON e.id=a.execution_turn_id AND e.owner_id=a.owner_id

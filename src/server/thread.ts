@@ -3246,8 +3246,6 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
                AND NOT EXISTS (SELECT 1 FROM turns x JOIN chain c ON c.id=x.id WHERE x.outside_action_at IS NOT NULL)
                AND NOT EXISTS (SELECT 1 FROM approvals a JOIN chain c ON c.id IN (a.turn_id,a.execution_turn_id)
                  WHERE a.owner_id=u.owner_id AND a.status IN ('confirmed','executing','uncertain','completed'))
-               AND NOT EXISTS (SELECT 1 FROM app_actions aa JOIN chain c ON c.id=aa.turn_id
-                 WHERE aa.owner_id=u.owner_id AND aa.status IN ('executing','completed','uncertain'))
                AND NOT EXISTS (SELECT 1 FROM tasks t WHERE t.owner_id=u.owner_id AND t.turn_id=u.id)
              FOR UPDATE`,
             [turnId, ownerId, threadId, fenceToken ?? null],
