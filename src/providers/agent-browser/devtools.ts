@@ -285,36 +285,12 @@ export async function openDevtools(
     if (known !== undefined) return known;
     return createWorld(session, frameId);
   };
-  const evaluate = async (
-    session: string,
-    context: number,
-    expression: string,
-    frameId?: string,
-  ) => {
-    let response: { result?: { value?: unknown }; exceptionDetails?: unknown };
-    try {
-      response = (await send(
-        'Runtime.evaluate',
-        { contextId: context, expression, returnByValue: true },
-        session,
-      )) as { result?: { value?: unknown }; exceptionDetails?: unknown };
-    } catch (error) {
-      if (
-        frameId &&
-        error instanceof Error &&
-        /Cannot find context with specified id/i.test(error.message)
-      ) {
-        worlds.delete(`${session}:${frameId}`);
-        const fresh = await createWorld(session, frameId);
-        response = (await send(
-          'Runtime.evaluate',
-          { contextId: fresh, expression, returnByValue: true },
-          session,
-        )) as { result?: { value?: unknown }; exceptionDetails?: unknown };
-      } else {
-        throw error;
-      }
-    }
+  const evaluate = async (session: string, context: number, expression: string) => {
+    const response = (await send(
+      'Runtime.evaluate',
+      { contextId: context, expression, returnByValue: true },
+      session,
+    )) as { result?: { value?: unknown }; exceptionDetails?: unknown };
     if (response.exceptionDetails) throw new Error('The page check failed.');
     return response.result?.value;
   };
@@ -346,7 +322,7 @@ export async function openDevtools(
       }
       for (const frame of frames) {
         try {
-          const context = await world(session, frame.id);
+          const context = await createWorld(session, frame.id);
           if (shadows === 'focus') {
             const { result } = (await send(
               'Runtime.evaluate',
@@ -389,14 +365,9 @@ export async function openDevtools(
               );
               if (exceptionDetails) throw new Error('The page check failed.');
             } else if (shadows === 'document')
-              await evaluate(session, context, 'globalThis.__nodRoots = [];', frame.id);
+              await evaluate(session, context, 'globalThis.__nodRoots = [];');
           }
-          const value = await evaluate(session, context, expression, frame.id);
-          const currentContext = worlds.get(`${session}:${frame.id}`) ?? context;
-          if (currentContext !== context) {
-            if (strict) throw new Error('The page changed while inspecting it.');
-            continue;
-          }
+          const value = await evaluate(session, context, expression);
           results.push({
             origin: frame.securityOrigin ?? '',
             session,

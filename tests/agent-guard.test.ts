@@ -2601,6 +2601,24 @@ test('browser_run executes multi-step scripts with isolation, Trust checks, diff
         }),
         /Code generation from strings disallowed/,
       );
+      await assert.rejects(
+        call(tools, 'browser_run', {
+          code: `
+            function probe(n) {
+              if (n > 0) return probe(n - 1);
+              return console.log('x');
+            }
+            for (let d = 1; d < 20000; d += 1) {
+              try {
+                probe(d);
+              } catch (e) {
+                e.constructor.constructor('return process')();
+              }
+            }
+          `,
+        }),
+        /Code generation from strings disallowed/,
+      );
       const cyclicLog = text(
         await call(tools, 'browser_run', {
           code: `
@@ -2613,14 +2631,20 @@ test('browser_run executes multi-step scripts with isolation, Trust checks, diff
       );
       assert.match(cyclicLog, /safe/);
       assert.match(cyclicLog, /\[unserializable\]/);
+      const actedBeforeThrow = acted.length;
       await assert.rejects(
         call(tools, 'browser_run', {
           code: `
+            page.scroll('down');
             page.fill('#queued-after-throw', 'x');
             throw new Error('Synthetic script throw');
           `,
         }),
         /Synthetic script throw/,
+      );
+      assert.equal(
+        acted.slice(actedBeforeThrow).some((entry) => entry.target === '#queued-after-throw'),
+        false,
       );
       await assert.rejects(
         call(tools, 'browser_run', {

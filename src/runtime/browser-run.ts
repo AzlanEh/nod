@@ -1,4 +1,4 @@
-import { Worker } from 'node:worker_threads';
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import {
   BrowserActionError,
   type BrowserAction,
@@ -59,16 +59,59 @@ interface WorkerError {
 
 type WorkerMessage = WorkerRequest | WorkerDone | WorkerError;
 
-const workerSource = `'use strict';
-const { parentPort, workerData } = require('node:worker_threads');
+const sandboxSource = `'use strict';
 const { createContext, Script } = require('node:vm');
+const readline = require('node:readline');
+const net = require('node:net');
+const tls = require('node:tls');
+const http = require('node:http');
+const https = require('node:https');
+const dgram = require('node:dgram');
+const dns = require('node:dns');
+
+const networkBlocked = () => {
+  throw new Error('Network access is disabled inside browser_run.');
+};
+net.Socket.prototype.connect = networkBlocked;
+net.connect = networkBlocked;
+net.createConnection = networkBlocked;
+tls.connect = networkBlocked;
+http.request = networkBlocked;
+http.get = networkBlocked;
+https.request = networkBlocked;
+https.get = networkBlocked;
+dgram.createSocket = networkBlocked;
+dns.lookup = networkBlocked;
+dns.resolve = networkBlocked;
+if (dns.promises) {
+  dns.promises.lookup = networkBlocked;
+  dns.promises.resolve = networkBlocked;
+}
+Object.defineProperty(globalThis, 'fetch', { value: undefined, writable: false, configurable: false });
+Object.defineProperty(globalThis, 'WebSocket', { value: undefined, writable: false, configurable: false });
+
+const send = (msg) => {
+  process.stdout.write(JSON.stringify(msg) + '\\n');
+};
 
 let nextId = 1;
 const pending = new Map();
 const logs = [];
 const maxLogs = ${maxConsoleLogs};
 
-parentPort.on('message', (msg) => {
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+rl.on('line', (line) => {
+  if (!line) return;
+  let msg;
+  try {
+    msg = JSON.parse(line);
+  } catch {
+    return;
+  }
+  if (msg.type === 'start') {
+    void runScript(String(msg.code || ''));
+    return;
+  }
   const entry = pending.get(msg.id);
   if (!entry) return;
   pending.delete(msg.id);
@@ -80,17 +123,21 @@ function invoke(method, args) {
   return new Promise((resolve, reject) => {
     const id = nextId++;
     pending.set(id, { resolve, reject });
-    parentPort.postMessage({ type: 'call', id, method, args });
+    send({ type: 'call', id, method, args });
   });
 }
 
-function serialize(value) {
+function safeSerialize(value) {
   if (value === undefined) return '';
   if (typeof value === 'string') return value;
   try {
-    return JSON.stringify(value, null, 2) ?? String(value);
-  } catch {
+    const json = JSON.stringify(value, null, 2);
+    if (typeof json === 'string') return json;
+  } catch {}
+  try {
     return String(value);
+  } catch {
+    return '[unserializable]';
   }
 }
 
@@ -215,20 +262,23 @@ bridge(
   },
 );
 
-(async () => {
+async function runScript(code) {
   try {
-    const script = new Script('(async () => {\\n' + workerData.code + '\\n})()', {
+    const script = new Script('(async () => {\\n' + code + '\\n})()', {
       filename: 'browser_run.js',
     });
     const value = await script.runInContext(context);
     const hasResult = value !== undefined;
-    const result = hasResult ? serialize(value) : '';
-    parentPort.postMessage({ type: 'done', result, hasResult, logs });
+    const result = hasResult ? safeSerialize(value) : '';
+    send({ type: 'done', result, hasResult, logs });
   } catch (error) {
-    const message = error && typeof error.message === 'string' ? error.message : String(error);
-    parentPort.postMessage({ type: 'error', message, logs });
+    const message = error && typeof error.message === 'string' ? error.message : safeSerialize(error);
+    send({ type: 'error', message, logs });
+  } finally {
+    rl.close();
+    process.exit(0);
   }
-})();
+}
 `;
 
 function optObj(value: unknown): Record<string, unknown> {
@@ -433,17 +483,17 @@ export async function runBrowserScript(
   let timedOut = false;
   let actionQueue = Promise.resolve();
   let inFlight: { index: number; action: string; started: boolean } | undefined;
+  let interrupted: { index: number; action: string; started: boolean } | undefined;
 
   const withActionSummary = (message: string) => {
     const prefix: string[] = [];
     if (actions.length) {
       prefix.push(`Ran ${formatActionCount(actions.length)}: ${actions.join(', ')}.`);
     }
-    if (inFlight) {
-      const status = inFlight.started
-        ? 'was still running and may have taken effect'
-        : 'did not run';
-      prefix.push(`Action ${inFlight.index + 1} (${inFlight.action}) ${status}.`);
+    const active = interrupted ?? inFlight;
+    if (active) {
+      const status = active.started ? 'was still running and may have taken effect' : 'did not run';
+      prefix.push(`Action ${active.index + 1} (${active.action}) ${status}.`);
     }
     return prefix.length ? `${prefix.join(' ')} ${message}` : message;
   };
@@ -494,7 +544,14 @@ export async function runBrowserScript(
         );
       } catch (error) {
         inFlight = undefined;
-        if (controller.signal.aborted) throw error;
+        if (controller.signal.aborted) {
+          interrupted ??= {
+            index: current.index,
+            action: current.action,
+            started: current.started,
+          };
+          throw error;
+        }
         const message = error instanceof Error ? error.message : String(error);
         const ran = actions.length
           ? `Ran ${formatActionCount(actions.length)}: ${actions.join(', ')}. `
@@ -556,7 +613,7 @@ export async function runBrowserScript(
   let logs: string[] = [];
   let serialized = '';
   let hasResult = false;
-  let worker: Worker | undefined;
+  let child: ChildProcessWithoutNullStreams | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let runFailure:
     | { kind: 'timeout' }
@@ -566,11 +623,14 @@ export async function runBrowserScript(
     | { kind: 'exit'; exitCode: number }
     | undefined;
 
-  const terminateWorker = async () => {
-    const current = worker;
-    worker = undefined;
+  const terminateChild = () => {
+    const current = child;
+    child = undefined;
     if (!current) return;
-    await current.terminate().catch(() => {});
+    try {
+      current.stdin.destroy();
+      current.kill('SIGKILL');
+    } catch {}
   };
 
   try {
@@ -585,7 +645,7 @@ export async function runBrowserScript(
       };
 
       const onAbort = () => {
-        void terminateWorker();
+        terminateChild();
         if (!paused) {
           if (timedOut) runFailure ??= { kind: 'timeout' };
           else runFailure ??= { kind: 'abort', reason: controller.signal.reason };
@@ -600,63 +660,102 @@ export async function runBrowserScript(
         controller.abort(new Error(`browser_run timed out after ${scriptTimeoutMs / 1000}s.`));
       }, scriptTimeoutMs);
 
-      worker = new Worker(workerSource, {
-        eval: true,
-        workerData: { code },
-        env: {},
-        execArgv: ['--permission'],
-        resourceLimits: { maxOldGenerationSizeMb: 64, maxYoungGenerationSizeMb: 16 },
-      });
+      child = spawn(
+        process.execPath,
+        [
+          '--permission',
+          '--disallow-code-generation-from-strings',
+          '--max-old-space-size=64',
+          '-e',
+          sandboxSource,
+        ],
+        { env: {}, stdio: ['pipe', 'pipe', 'pipe'] },
+      );
 
-      worker.on('message', (msg: WorkerMessage) => {
-        if (msg.type === 'call') {
+      const sendToChild = (msg: Record<string, unknown>) => {
+        if (settled || !child || child.stdin.destroyed) return;
+        try {
+          child.stdin.write(JSON.stringify(msg) + '\n');
+        } catch {}
+      };
+
+      const stdoutLines: string[] = [];
+      let stdoutBuffer = '';
+      child.stdout.setEncoding('utf8');
+      child.stdout.on('data', (chunk: string) => {
+        stdoutBuffer += chunk;
+        for (let end = stdoutBuffer.indexOf('\n'); end >= 0; end = stdoutBuffer.indexOf('\n')) {
+          const line = stdoutBuffer.slice(0, end);
+          stdoutBuffer = stdoutBuffer.slice(end + 1);
+          if (line) stdoutLines.push(line);
+        }
+        const pendingCalls: WorkerRequest[] = [];
+        let terminal: WorkerDone | WorkerError | undefined;
+        for (const line of stdoutLines.splice(0)) {
+          let msg: WorkerMessage;
+          try {
+            msg = JSON.parse(line) as WorkerMessage;
+          } catch {
+            continue;
+          }
+          if (msg.type === 'done' || msg.type === 'error') {
+            terminal = msg;
+            break;
+          }
+          if (msg.type === 'call') pendingCalls.push(msg);
+        }
+        if (terminal) {
+          if (terminal.type === 'done') {
+            logs = terminal.logs;
+            serialized = terminal.result;
+            hasResult = terminal.hasResult;
+            finish();
+            return;
+          }
+          logs = terminal.logs;
+          runFailure ??= { kind: 'script', message: terminal.message };
+          if (!controller.signal.aborted) controller.abort(new Error(terminal.message));
+          finish();
+          return;
+        }
+        for (const msg of pendingCalls) {
           void executeMethod(msg.method, msg.args).then(
             (value) => {
-              if (!settled && worker) worker.postMessage({ id: msg.id, ok: true, value });
+              sendToChild({ id: msg.id, ok: true, value });
             },
             (error: unknown) => {
               const message = error instanceof Error ? error.message : String(error);
-              if (!settled && worker) worker.postMessage({ id: msg.id, ok: false, error: message });
+              sendToChild({ id: msg.id, ok: false, error: message });
             },
           );
-          return;
-        }
-        if (msg.type === 'done') {
-          logs = msg.logs;
-          serialized = msg.result;
-          hasResult = msg.hasResult;
-          finish();
-          return;
-        }
-        if (msg.type === 'error') {
-          logs = msg.logs;
-          runFailure ??= { kind: 'script', message: msg.message };
-          if (!controller.signal.aborted) controller.abort(new Error(msg.message));
-          finish();
         }
       });
 
-      worker.on('error', (error) => {
+      child.stdin.on('error', () => {});
+
+      child.on('error', (error) => {
         runFailure ??= { kind: 'worker', error };
         if (!controller.signal.aborted) controller.abort(error);
         finish();
       });
 
-      worker.on('exit', (exitCode) => {
+      child.on('exit', (exitCode) => {
         if (settled) return;
         if (!paused) {
           if (timedOut) runFailure ??= { kind: 'timeout' };
-          else runFailure ??= { kind: 'exit', exitCode };
+          else runFailure ??= { kind: 'exit', exitCode: exitCode ?? 1 };
           if (!controller.signal.aborted)
-            controller.abort(new Error(`browser_run exited unexpectedly (${exitCode}).`));
+            controller.abort(new Error(`browser_run exited unexpectedly (${exitCode ?? 1}).`));
         }
         finish();
       });
+
+      sendToChild({ type: 'start', code });
     });
   } finally {
     if (timer) clearTimeout(timer);
     handlers.signal.removeEventListener('abort', onOuterAbort);
-    await terminateWorker();
+    terminateChild();
     await actionQueue.catch(() => {});
   }
 

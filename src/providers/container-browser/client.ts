@@ -103,6 +103,7 @@ export function createBridgeComputer(options: {
         resolveReady: () => void;
         rejectReady: (error: Error) => void;
         isReady: boolean;
+        readyTimer: ReturnType<typeof setTimeout>;
       }
     | undefined;
 
@@ -114,6 +115,7 @@ export function createBridgeComputer(options: {
     const channel = persistent;
     if (!channel || channel.closed) return;
     channel.closed = true;
+    clearTimeout(channel.readyTimer);
     persistent = undefined;
     if (!channel.isReady) {
       channel.rejectReady(new Error(reason ?? 'exit'));
@@ -140,6 +142,9 @@ export function createBridgeComputer(options: {
       rejectReady = reject;
     });
     ready.catch(() => {});
+    const readyTimer = setTimeout(() => {
+      if (persistent === channel && !channel.isReady) dropPersistent('ready_timeout');
+    }, options.drainTimeoutMs ?? 15_000);
     const channel = {
       child,
       entries: new Map<string, MultiplexEntry>(),
@@ -150,6 +155,7 @@ export function createBridgeComputer(options: {
       resolveReady,
       rejectReady,
       isReady: false,
+      readyTimer,
     };
     persistent = channel;
     child.stdin.on('error', (error) => {
@@ -178,6 +184,7 @@ export function createBridgeComputer(options: {
           if (value && typeof value === 'object' && value.type === 'ready') {
             if (!channel.isReady) {
               channel.isReady = true;
+              clearTimeout(channel.readyTimer);
               channel.resolveReady();
             }
             continue;
@@ -384,10 +391,14 @@ export function createBridgeComputer(options: {
         let cancelling = false;
         let written = false;
         let drainTimer: ReturnType<typeof setTimeout> | undefined;
+        let timedOut = false;
         const timer =
           options.timeoutMs === undefined
             ? undefined
-            : setTimeout(() => cancel(), options.timeoutMs);
+            : setTimeout(() => {
+                timedOut = true;
+                cancel();
+              }, options.timeoutMs);
         const cleanup = () => {
           clearTimeout(timer);
           clearTimeout(drainTimer);
@@ -401,7 +412,12 @@ export function createBridgeComputer(options: {
           exit?: { exitCode: number | null; signal: string | null },
         ) => {
           if (settled) return;
-          if (!written && !channel.isReady && !cancelling && reason === 'exit') {
+          if (
+            !written &&
+            !channel.isReady &&
+            !cancelling &&
+            (reason === 'exit' || reason === 'ready_timeout')
+          ) {
             settled = true;
             const proxyRefused = /403|forbidden|not allowed/i.test(channel.stderr);
             if (proxyRefused) {
@@ -433,7 +449,9 @@ export function createBridgeComputer(options: {
                 ? signal.reason instanceof Error
                   ? signal.reason
                   : new DOMException('Aborted', 'AbortError')
-                : new Error('The browser action timed out. Check the page before trying again.'),
+                : timedOut
+                  ? new Error('The browser action timed out. Check the page before trying again.')
+                  : new Error('The browser operation was cancelled before it was sent.'),
             );
             return;
           }
