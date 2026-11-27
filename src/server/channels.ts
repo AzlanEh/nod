@@ -121,6 +121,7 @@ interface ChannelOptions {
   acceptInteraction?: (
     client: PoolClient,
     input: {
+      threadId: string;
       sourceId: string;
       channel: string;
       messageId: string;
@@ -691,6 +692,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
             const messageId = randomUUID();
             const turnId = options.acceptInteraction
               ? await options.acceptInteraction(client, {
+                  threadId: row.thread_id,
                   sourceId,
                   channel,
                   messageId,
@@ -1923,7 +1925,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
       const last = presence.get(channel);
       if (
         !settings?.presenceMs ||
-        !row.source_id.startsWith(prefix) ||
+        (!row.source_id.startsWith(prefix) && !row.source_id.startsWith('interaction:')) ||
         (settings.replyWindowMs !== undefined &&
           Date.now() - row.at.getTime() >= settings.replyWindowMs) ||
         (last?.status === status && Date.now() - last.at < settings.presenceMs)

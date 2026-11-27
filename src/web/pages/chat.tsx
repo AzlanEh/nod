@@ -2465,7 +2465,7 @@ export function Chat({
                       onRetry={
                         message.role === 'assistant' &&
                         message.retryable &&
-                        index === state.messages.length - 1 &&
+                        index === visibleMessages.length - 1 &&
                         !sending &&
                         !state.turns.some(
                           (turn) => turn.status === 'running' || turn.status === 'queued',

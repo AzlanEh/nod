@@ -3776,6 +3776,7 @@ async function initializeApplication(
       acceptInteraction: async (client, input) =>
         (
           await userMessages.submit(input.text, [], {
+            threadId: input.threadId,
             sourceId: input.sourceId,
             channel: input.channel,
             client,

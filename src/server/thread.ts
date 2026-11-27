@@ -1920,7 +1920,6 @@ export async function sweepExpiredTurns(present?: ThreadDependencies['present'])
   );
   let swept = 0;
   for (const row of rows) {
-    abortTurns([row.id]);
     const expired = await pool
       .query<{ id: string }>(
         `SELECT id FROM turns
@@ -1929,6 +1928,7 @@ export async function sweepExpiredTurns(present?: ThreadDependencies['present'])
       )
       .then((res) => res.rowCount ?? 0);
     if (expired && (await failTurn(row.id, present))) swept++;
+    abortTurns([row.id]);
   }
   return swept;
 }
@@ -2295,6 +2295,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
   const { signal } = controller;
   running.set(turnId, controller);
   if (stopping) controller.abort();
+  let leaseLost = false;
   const renewLease = () => {
     if (signal.aborted || stopping) return;
     void pool
@@ -2306,7 +2307,10 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
         [turnId, ownerId, turnLeaseMs, fenceToken ?? null],
       )
       .then(({ rowCount }) => {
-        if (!rowCount) abortTurns([turnId]);
+        if (!rowCount) {
+          leaseLost = true;
+          abortTurns([turnId]);
+        }
       })
       .catch(() => {});
   };
@@ -3191,6 +3195,11 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
         );
         return;
       }
+      if (leaseLost) {
+        outcome = 'interrupted';
+        await failTurn(turnId, dependencies.present);
+        return;
+      }
       outcome = 'cancelled';
       return;
     }
@@ -3287,7 +3296,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
   } finally {
     clearInterval(leaseTimer);
     clearTimeout(wallClockTimer);
-    if (signal.aborted && !stopping && !timedOut)
+    if (signal.aborted && !stopping && !timedOut && !leaseLost)
       await cancellationTransaction((client) =>
         client.query(
           "UPDATE turns SET status='cancelled',lease_expires_at=NULL,fence_token=fence_token+1,finished_at=now() WHERE id=$1 AND owner_id=$2 AND status='running'",

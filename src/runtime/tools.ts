@@ -1354,19 +1354,30 @@ export function nodTools(
             });
             const toPersist: Array<{ id: string; payload: unknown; validUntil: Date }> = [];
             const validUntil = new Date(Date.now() + 60 * 60 * 1000);
-            const turnTag = context.turnId.slice(0, 8);
+            const turnTag = context.turnId.replace(/-/g, '').slice(0, 4);
             const searches = result.searches.map((search) => {
               if ('error' in search) return search;
               const { options, upperBound, ...rest } = search;
               const source = { label: 'Google Flights', url: search.url };
               const taggedSummary = (item: (typeof options)[number]) => {
                 const scopedId = `${turnTag}-${item.option.id}`;
+                const nextSummary =
+                  item.summary === item.option.id ||
+                  item.summary.startsWith(`${item.option.id} `) ||
+                  item.summary.startsWith(`${item.option.id}:`)
+                    ? `${scopedId}${item.summary.slice(item.option.id.length)}`
+                    : item.summary;
                 return {
                   scopedId,
-                  option: { ...item.option, id: scopedId },
-                  summary: item.summary.startsWith(`${item.option.id}:`)
-                    ? `${scopedId}:${item.summary.slice(item.option.id.length + 1)}`
-                    : item.summary,
+                  option: {
+                    ...item.option,
+                    id: scopedId,
+                    journeys: item.option.journeys.map((journey, index) => ({
+                      ...journey,
+                      id: `${scopedId}-${index + 1}`,
+                    })),
+                  },
+                  summary: nextSummary,
                 };
               };
               const tagged = options.map((item) => ({ ...item, ...taggedSummary(item) }));

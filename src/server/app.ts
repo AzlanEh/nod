@@ -78,10 +78,17 @@ const messageFields = `m.id,m.role,m.text,CASE WHEN m.role='user' THEN m.display
  CASE WHEN m.role='assistant' THEN (SELECT json_build_object('id',ci.id,'status',ci.status,'selectedOptionIds',ci.selected_option_ids,'validUntil',ci.valid_until) FROM card_interactions ci
    WHERE ci.message_id=m.id AND ci.owner_id=m.owner_id ORDER BY ci.created_at DESC LIMIT 1) END AS "interaction",
  (m.role='assistant' AND m.stream_id LIKE 'failure:%' AND EXISTS (
+   WITH RECURSIVE chain(id,next,thread_id) AS (
+     SELECT u.id,u.parent_turn_id,u.thread_id FROM turns u WHERE u.id=m.turn_id AND u.owner_id=m.owner_id AND u.thread_id=m.thread_id
+     UNION
+     SELECT u.id,u.parent_turn_id,u.thread_id FROM chain c
+     JOIN turns u ON u.id=c.next AND u.owner_id=m.owner_id AND u.thread_id=c.thread_id
+   )
    SELECT 1 FROM turns u WHERE u.id=m.turn_id AND u.owner_id=m.owner_id
      AND u.status='failed' AND u.outside_action_at IS NULL
-     AND NOT EXISTS (SELECT 1 FROM approvals a WHERE a.owner_id=u.owner_id AND (a.turn_id=u.id OR a.execution_turn_id=u.id)
-       AND a.status IN ('confirmed','executing','uncertain','completed'))
+     AND NOT EXISTS (SELECT 1 FROM turns x JOIN chain c ON c.id=x.id WHERE x.outside_action_at IS NOT NULL)
+     AND NOT EXISTS (SELECT 1 FROM approvals a JOIN chain c ON c.id IN (a.turn_id,a.execution_turn_id)
+       WHERE a.owner_id=u.owner_id AND a.status IN ('confirmed','executing','uncertain','completed'))
  )) AS "retryable",
  CASE WHEN m.role='assistant' THEN (SELECT json_build_object('id',a.id,'status',a.status,'action',a.action,'title',a.title,'decline',a.decline,'cardQuestion',a.card_question,'args',a.args,'failure',CASE WHEN a.status IN ('expired','uncertain') AND jsonb_typeof(a.result->'error')='string' THEN a.result->>'error' END,'active',u.status IN ('running','waiting'),'executionActive',e.status IN ('queued','running','waiting')) FROM approvals a
    JOIN turns u ON u.id=a.turn_id AND u.owner_id=a.owner_id LEFT JOIN turns e ON e.id=a.execution_turn_id AND e.owner_id=a.owner_id

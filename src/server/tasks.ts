@@ -9,6 +9,8 @@ import { recordedAction, toolTitle } from './action-presentation.ts';
 import { workspaceCommandsSql, workspaceCommand } from './workspace-commands.ts';
 import type { ChannelPresentation } from './channels.ts';
 import { classifyVerificationReply } from '../shared/verification-code.ts';
+import { previewableUrl } from '../shared/link-preview.ts';
+import { logFailure } from './failure-log.ts';
 import {
   abortTurns,
   activeHandoffSql,
@@ -51,6 +53,7 @@ const wakeCheck = z
     target: z.string().trim().min(1).max(2000),
     baseline: z.string().max(256).optional(),
     intervalMinutes: z.number().int().min(1).max(1440).optional(),
+    failures: z.number().int().min(0).max(10).optional(),
   })
   .strict();
 const credentialUrl = /(?<![\w/])(?:[a-z][a-z\d+.-]*:)?\/\/[^/\s?#<>]*@/iu;
@@ -675,6 +678,19 @@ export function createTasks(options: {
       id = request.id;
       if (current.task_id !== id)
         throw failure('Only the task session can change its progress or result.');
+      if (request.action === 'update' && request.wakeCheck) {
+        if (request.wakeCheck.kind === 'url_change') {
+          if (!previewableUrl(request.wakeCheck.target)?.startsWith('https://'))
+            throw failure(
+              'wakeCheck url_change requires a public HTTPS URL without embedded credentials.',
+            );
+        } else if (
+          request.wakeCheck.target.startsWith('/') ||
+          request.wakeCheck.target.split(/[\\/]/).includes('..')
+        ) {
+          throw failure('wakeCheck file_exists requires a relative path inside the task folder.');
+        }
+      }
       const updated =
         request.action === 'update'
           ? await client.query(
@@ -770,18 +786,46 @@ export function createTasks(options: {
     let resumed = immediate;
     for (const row of prechecks) {
       const parsedCheck = wakeCheck.parse(row.wake_check);
-      const outcome: { changed: boolean; baseline?: string; summary?: string } =
-        await options.evaluateWakeCheck!(threadId, row.id, parsedCheck).catch(() => ({
-          changed: false,
-        }));
+      let outcome: { changed: boolean; baseline?: string; summary?: string };
+      let failedReason: string | undefined;
+      try {
+        outcome = await options.evaluateWakeCheck!(threadId, row.id, parsedCheck);
+      } catch (error) {
+        logFailure('task_wake_check_failed', error, { threadId, taskId: row.id });
+        const failures = (parsedCheck.failures ?? 0) + 1;
+        failedReason = error instanceof Error ? error.message : String(error);
+        if (failures >= 3) {
+          outcome = {
+            changed: true,
+            summary: `Wake check failed ${failures} times in a row (${failedReason.slice(0, 200)}).`,
+          };
+        } else {
+          const minutes = parsedCheck.intervalMinutes ?? 15;
+          const nextAt = new Date(Date.now() + minutes * 60_000);
+          await transaction(async (client) => {
+            if ((await lockThread(client)).id !== threadId) return;
+            const nextWake = { ...parsedCheck, failures };
+            const res = await client.query(
+              `UPDATE tasks SET next_check=$3,wake_check=$4::jsonb,updated_at=now()
+               WHERE id=$1 AND owner_id=$2 AND state='open' AND next_check=$5
+                 AND NOT EXISTS (SELECT 1 FROM turns u WHERE u.owner_id=tasks.owner_id AND u.session_id=tasks.session_id
+                   AND (u.status IN ('queued','running') OR (${waitingTurnSql('u')})))`,
+              [row.id, ownerId, nextAt, JSON.stringify(nextWake), row.next_check],
+            );
+            if (res.rowCount) await wakeThreadAt(client, nextAt);
+          }, pool);
+          continue;
+        }
+      }
       if (!outcome.changed) {
         const minutes = parsedCheck.intervalMinutes ?? 15;
         const nextAt = new Date(Date.now() + minutes * 60_000);
         await transaction(async (client) => {
           if ((await lockThread(client)).id !== threadId) return;
+          const { failures: _failures, ...restCheck } = parsedCheck;
           const nextWake = outcome.baseline
-            ? { ...parsedCheck, baseline: outcome.baseline }
-            : parsedCheck;
+            ? { ...restCheck, baseline: outcome.baseline }
+            : restCheck;
           const res = await client.query(
             `UPDATE tasks SET next_check=$3,wake_check=$4::jsonb,updated_at=now()
              WHERE id=$1 AND owner_id=$2 AND state='open' AND next_check=$5

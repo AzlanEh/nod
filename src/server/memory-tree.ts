@@ -319,7 +319,31 @@ export function render(tree: Tree) {
   return bytes;
 }
 
-export function fits(tree: Tree) {
+export function fits(tree: Tree, { preserveArchive = false }: { preserveArchive?: boolean } = {}) {
+  if (preserveArchive) {
+    const bytes = new TextEncoder().encode(
+      JSON.stringify(
+        {
+          version: 2,
+          enabled: tree.enabled,
+          sensitive: tree.sensitive,
+          reflected: tree.reflected,
+          generation: tree.generation,
+          retries: tree.retries,
+          entries: tree.entries.toSorted(
+            (a, b) => areas.indexOf(a.area) - areas.indexOf(b.area) || bySlug(a, b),
+          ),
+          archive: tree.archive,
+          ...(tree.skills.length
+            ? { skills: tree.skills.toSorted((a, b) => a.name.localeCompare(b.name)) }
+            : {}),
+        },
+        null,
+        1,
+      ),
+    );
+    return bytes.length <= maxBytes;
+  }
   try {
     render(tree);
     return true;
