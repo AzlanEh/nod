@@ -98,7 +98,10 @@ function computeLineDiff(prev: string[], next: string[]): string | null {
     parts.push(`Added (${added.length} lines):`);
     for (const line of added) parts.push(`+ ${line}`);
   }
-  return parts.join('\n');
+  const output = parts.join('\n');
+  const nextChars = next.reduce((total, line) => total + line.length + 1, 0);
+  if (nextChars > 0 && output.length > nextChars) return null;
+  return output;
 }
 
 export function createPageDiffer() {

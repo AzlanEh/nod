@@ -393,10 +393,14 @@ export async function openDevtools(
           }
           const value = await evaluate(session, context, expression, frame.id);
           const currentContext = worlds.get(`${session}:${frame.id}`) ?? context;
+          if (currentContext !== context) {
+            if (strict) throw new Error('The page changed while inspecting it.');
+            continue;
+          }
           results.push({
             origin: frame.securityOrigin ?? '',
             session,
-            context: currentContext,
+            context,
             value,
           });
         } catch (error) {

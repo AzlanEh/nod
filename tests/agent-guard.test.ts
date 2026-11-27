@@ -2594,6 +2594,16 @@ test('browser_run executes multi-step scripts with isolation, Trust checks, diff
       await assert.rejects(
         call(tools, 'browser_run', {
           code: `
+            const p = page.scroll('down');
+            await p;
+            return p.constructor.constructor('return process')().env;
+          `,
+        }),
+        /Code generation from strings disallowed/,
+      );
+      await assert.rejects(
+        call(tools, 'browser_run', {
+          code: `
             await page.scroll('down');
             await page.click('#refused');
           `,

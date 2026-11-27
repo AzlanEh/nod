@@ -1075,6 +1075,7 @@ export function nodTools(
   };
   const check = async (
     step: BrowserStep['step'],
+    checkSignal: AbortSignal = signal,
   ): Promise<
     | {
         binding: { expectOrigin?: string; expectUrl?: string; expectTarget?: string };
@@ -1084,11 +1085,12 @@ export function nodTools(
     | { output: unknown }
   > => {
     if (!context.browserStep) return { binding: {} };
+    checkSignal.throwIfAborted();
     const page = await computer.currentPage(
       browserId,
       step.action === 'upload' ? { action: 'click', selector: step.selector } : step,
     );
-    signal.throwIfAborted();
+    checkSignal.throwIfAborted();
     const control = page.controls?.length === 1 ? page.controls[0]! : undefined;
     if (
       control &&
@@ -1105,7 +1107,7 @@ export function nodTools(
       typed: pageKey(page.url) === typedPage ? typed : [],
       subagent: Boolean(turn.execution.parentRunId),
     });
-    signal.throwIfAborted();
+    checkSignal.throwIfAborted();
     if (verdict === 'run' || (typeof verdict === 'object' && 'record' in verdict))
       return {
         ...(verdict === 'run' ? {} : { record: verdict.record }),
@@ -1142,7 +1144,7 @@ export function nodTools(
         if (!(error instanceof BrowserActionError && error.code === 'browser_script_writes'))
           throw error;
       }
-    const checked = commits(step) ? await check(step) : { binding: {} };
+    const checked = commits(step) ? await check(step, activeSignal) : { binding: {} };
     if ('output' in checked) return { output: checked.output };
     started?.();
     const shouldSkipObserve =

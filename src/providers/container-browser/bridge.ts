@@ -17,8 +17,17 @@ export function runBrowserBridge(options: {
     let requestId: string | undefined;
     let cancelled = false;
     let ended = false;
-    const multiplex = options.multiplex === true;
-    if (multiplex) socket.write(JSON.stringify({ type: 'multiplex' }) + '\n');
+    let multiplex = false;
+    let readySent = false;
+    if (options.multiplex === true) {
+      multiplex = true;
+      socket.on('connect', () => {
+        if (ended || readySent) return;
+        readySent = true;
+        socket.write(JSON.stringify({ type: 'multiplex' }) + '\n');
+        options.output.write(JSON.stringify({ type: 'ready' }) + '\n');
+      });
+    }
     const finish = (code: number) => {
       if (ended) return;
       ended = true;

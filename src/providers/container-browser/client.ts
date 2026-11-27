@@ -99,7 +99,10 @@ export function createBridgeComputer(options: {
         stderr: string;
         output: string;
         closed: boolean;
-        responded: boolean;
+        ready: Promise<void>;
+        resolveReady: () => void;
+        rejectReady: (error: Error) => void;
+        isReady: boolean;
       }
     | undefined;
 
@@ -112,6 +115,9 @@ export function createBridgeComputer(options: {
     if (!channel || channel.closed) return;
     channel.closed = true;
     persistent = undefined;
+    if (!channel.isReady) {
+      channel.rejectReady(new Error(reason ?? 'exit'));
+    }
     try {
       channel.child.stdin.destroy();
       channel.child.kill('SIGKILL');
@@ -127,13 +133,23 @@ export function createBridgeComputer(options: {
     if (persistent && !persistent.closed) return persistent;
     if (!options.launchPersistent) return undefined;
     const child = options.launchPersistent();
+    let resolveReady!: () => void;
+    let rejectReady!: (error: Error) => void;
+    const ready = new Promise<void>((resolve, reject) => {
+      resolveReady = resolve;
+      rejectReady = reject;
+    });
+    ready.catch(() => {});
     const channel = {
       child,
       entries: new Map<string, MultiplexEntry>(),
       stderr: '',
       output: '',
       closed: false,
-      responded: false,
+      ready,
+      resolveReady,
+      rejectReady,
+      isReady: false,
     };
     persistent = channel;
     child.stdin.on('error', (error) => {
@@ -159,9 +175,15 @@ export function createBridgeComputer(options: {
         }
         try {
           const value = JSON.parse(line);
+          if (value && typeof value === 'object' && value.type === 'ready') {
+            if (!channel.isReady) {
+              channel.isReady = true;
+              channel.resolveReady();
+            }
+            continue;
+          }
           const part = chunkFrame.safeParse(value);
           if (part.success) {
-            channel.responded = true;
             const entry = channel.entries.get(part.data.id);
             if (!entry || !entry.chunks) throw new Error();
             const bytes = Buffer.from(part.data.chunk, 'base64');
@@ -171,7 +193,6 @@ export function createBridgeComputer(options: {
             continue;
           }
           const response = browserResponse.parse(value);
-          channel.responded = true;
           const entry = channel.entries.get(response.id);
           if (!entry) continue;
           channel.entries.delete(response.id);
@@ -185,7 +206,6 @@ export function createBridgeComputer(options: {
     });
     child.on('close', (code, signal) => {
       if (persistent === channel) {
-        if (!channel.responded) persistentDisabled = true;
         dropPersistent('exit', undefined, { exitCode: code, signal: signal ?? null });
       }
     });
@@ -241,6 +261,7 @@ export function createBridgeComputer(options: {
     signal?: AbortSignal,
     transfer: { data?: Uint8Array; chunks?: Buffer[] } = {},
     recovery = false,
+    forceOneShot = false,
   ): Promise<unknown> {
     signal?.throwIfAborted();
     const request = browserRequest.parse({
@@ -343,7 +364,10 @@ export function createBridgeComputer(options: {
       );
     };
     const usePersistent =
-      Boolean(options.launchPersistent) && !persistentDisabled && input.method !== 'dispose';
+      !forceOneShot &&
+      Boolean(options.launchPersistent) &&
+      !persistentDisabled &&
+      input.method !== 'dispose';
     const result = new Promise<unknown>((resolve, reject) => {
       if (usePersistent) {
         let channel: NonNullable<typeof persistent>;
@@ -358,6 +382,7 @@ export function createBridgeComputer(options: {
         }
         let settled = false;
         let cancelling = false;
+        let written = false;
         let drainTimer: ReturnType<typeof setTimeout> | undefined;
         const timer =
           options.timeoutMs === undefined
@@ -376,11 +401,17 @@ export function createBridgeComputer(options: {
           exit?: { exitCode: number | null; signal: string | null },
         ) => {
           if (settled) return;
-          if (!channel.responded && !cancelling && reason === 'exit') {
+          if (!written && !channel.isReady && !cancelling && reason === 'exit') {
             settled = true;
-            persistentDisabled = true;
+            const proxyRefused = /403|forbidden|not allowed/i.test(channel.stderr);
+            if (proxyRefused) {
+              persistentDisabled = true;
+              logFailure('browser_bridge_multiplex_fallback', new Error(channel.stderr || reason), {
+                method: input.method,
+              });
+            }
             cleanup();
-            void call(input, signal, transfer, recovery).then(resolve, reject);
+            void call(input, signal, transfer, recovery, true).then(resolve, reject);
             return;
           }
           settled = true;
@@ -393,12 +424,12 @@ export function createBridgeComputer(options: {
         function cancel() {
           if (settled || cancelling) return;
           cancelling = true;
-          if (!['currentPage', 'screenshot'].includes(input.method)) {
+          if (written && !['currentPage', 'screenshot'].includes(input.method)) {
             if (browserId) uncertainBrowsers.add(browserId);
             else uncertain = true;
           }
           clearTimeout(timer);
-          if (!channel.closed) {
+          if (written && !channel.closed) {
             try {
               channel.child.stdin.write(JSON.stringify({ type: 'cancel', id: request.id }) + '\n');
             } catch {}
@@ -426,6 +457,13 @@ export function createBridgeComputer(options: {
             runInContext(() => unavailable(reason, error, exit)),
         });
         void (async () => {
+          try {
+            await channel.ready;
+          } catch {
+            return;
+          }
+          if (settled || cancelling || channel.closed) return;
+          written = true;
           if (!channel.child.stdin.write(encoded)) await once(channel.child.stdin, 'drain');
           const data = transfer.data ?? new Uint8Array();
           for (let offset = 0; offset < data.length; offset += transferBytes) {

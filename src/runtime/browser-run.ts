@@ -101,8 +101,18 @@ const context = createContext(Object.create(null), {
 const bridge = new Script(\`
 (function(invokeJson, logLine) {
   function call(method, args) {
-    return invokeJson(method, JSON.stringify(args)).then(function(raw) {
-      return raw === undefined ? undefined : JSON.parse(raw);
+    return new Promise(function(resolve, reject) {
+      invokeJson(method, JSON.stringify(args), function(err, raw) {
+        if (err) {
+          reject(new Error(String(err)));
+          return;
+        }
+        try {
+          resolve(raw === undefined ? undefined : JSON.parse(String(raw)));
+        } catch (parseErr) {
+          reject(new Error(String(parseErr && parseErr.message ? parseErr.message : parseErr)));
+        }
+      });
     });
   }
   function makeArgs() {
@@ -129,13 +139,23 @@ const bridge = new Script(\`
     warn: function() { logLine(makeArgs.apply(null, arguments)); },
     error: function() { logLine(makeArgs.apply(null, arguments)); },
   });
-  globalThis.page = page;
-  globalThis.console = consoleObj;
+  Object.defineProperty(globalThis, 'page', {
+    value: page,
+    writable: false,
+    configurable: false,
+    enumerable: true,
+  });
+  Object.defineProperty(globalThis, 'console', {
+    value: consoleObj,
+    writable: false,
+    configurable: false,
+    enumerable: true,
+  });
 })
 \`).runInContext(context);
 
 bridge(
-  (method, rawArgs) => {
+  (method, rawArgs, done) => {
     let args = [];
     try {
       args = JSON.parse(String(rawArgs));
@@ -143,8 +163,13 @@ bridge(
     } catch {
       args = [];
     }
-    return invoke(String(method), args).then((val) =>
-      val === undefined ? undefined : JSON.stringify(val),
+    invoke(String(method), args).then(
+      (val) => {
+        done(null, val === undefined ? undefined : JSON.stringify(val));
+      },
+      (err) => {
+        done(err && typeof err.message === 'string' ? err.message : String(err));
+      },
     );
   },
   (args) => {
@@ -372,6 +397,21 @@ export async function runBrowserScript(
   let paused: ApprovalPause | undefined;
   let timedOut = false;
   let actionQueue = Promise.resolve();
+  let inFlight: { index: number; action: string; started: boolean } | undefined;
+
+  const withActionSummary = (message: string) => {
+    const prefix: string[] = [];
+    if (actions.length) {
+      prefix.push(`Ran ${formatActionCount(actions.length)}: ${actions.join(', ')}.`);
+    }
+    if (inFlight) {
+      const status = inFlight.started
+        ? 'was still running and may have taken effect'
+        : 'did not run';
+      prefix.push(`Action ${inFlight.index + 1} (${inFlight.action}) ${status}.`);
+    }
+    return prefix.length ? `${prefix.join(' ')} ${message}` : message;
+  };
 
   const stopError = () => {
     if (paused) return new Error('Browser run paused for approval.');
@@ -406,29 +446,32 @@ export async function runBrowserScript(
         return Boolean(image);
       }
       const { step, observe } = built;
-      let started = false;
+      const current = { index, action: step.action, started: false };
+      inFlight = current;
       let done: BrowserRunActResult | { output: unknown };
       try {
         done = await handlers.act(
           step,
           () => {
-            started = true;
+            current.started = true;
           },
           { observe, signal: controller.signal },
         );
       } catch (error) {
+        inFlight = undefined;
         if (controller.signal.aborted) throw error;
         const message = error instanceof Error ? error.message : String(error);
         const ran = actions.length
           ? `Ran ${formatActionCount(actions.length)}: ${actions.join(', ')}. `
           : '';
-        const status = started ? 'failed and may have taken effect' : 'did not run';
+        const status = current.started ? 'failed and may have taken effect' : 'did not run';
         const detail = `${ran}Action ${index + 1} (${step.action}) ${status}. ${message}`;
         if (error instanceof BrowserActionError) {
           throw new Error(detail, { cause: error });
         }
         throw new Error(detail, { cause: error });
       }
+      inFlight = undefined;
       if ('output' in done) {
         paused = { stepIndex: index, action: step.action, output: done.output };
         controller.abort(new Error('Browser run paused for approval.'));
@@ -504,12 +547,16 @@ export async function runBrowserScript(
         finish(() => {
           if (paused) resolve();
           else if (timedOut)
-            reject(new Error(`browser_run timed out after ${scriptTimeoutMs / 1000}s.`));
+            reject(
+              new Error(
+                withActionSummary(`browser_run timed out after ${scriptTimeoutMs / 1000}s.`),
+              ),
+            );
           else
             reject(
               controller.signal.reason instanceof Error
                 ? controller.signal.reason
-                : new Error('Browser run aborted.'),
+                : new Error(withActionSummary('Browser run aborted.')),
             );
         });
       };
@@ -525,6 +572,7 @@ export async function runBrowserScript(
         eval: true,
         workerData: { code },
         env: {},
+        execArgv: ['--permission'],
         resourceLimits: { maxOldGenerationSizeMb: 64, maxYoungGenerationSizeMb: 16 },
       });
 
@@ -550,7 +598,11 @@ export async function runBrowserScript(
         }
         if (msg.type === 'error') {
           logs = msg.logs;
-          finish(() => reject(new Error(msg.message)));
+          const message =
+            msg.message.startsWith('Ran ') || msg.message.startsWith('Action ')
+              ? msg.message
+              : withActionSummary(msg.message);
+          finish(() => reject(new Error(message)));
         }
       });
 
@@ -563,8 +615,13 @@ export async function runBrowserScript(
         finish(() => {
           if (paused) resolve();
           else if (timedOut)
-            reject(new Error(`browser_run timed out after ${scriptTimeoutMs / 1000}s.`));
-          else reject(new Error(`browser_run exited unexpectedly (${exitCode}).`));
+            reject(
+              new Error(
+                withActionSummary(`browser_run timed out after ${scriptTimeoutMs / 1000}s.`),
+              ),
+            );
+          else
+            reject(new Error(withActionSummary(`browser_run exited unexpectedly (${exitCode}).`)));
         });
       });
     });
