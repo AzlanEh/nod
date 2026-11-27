@@ -182,11 +182,14 @@ export async function openDevtools(
     });
   const follow = (sessionId: string) => {
     sessions.add(sessionId);
-    const followed = send(
-      'Target.setAutoAttach',
-      { autoAttach: true, waitForDebuggerOnStart: false, flatten: true },
-      sessionId,
-    ).catch(() => {});
+    const followed = Promise.all([
+      send(
+        'Target.setAutoAttach',
+        { autoAttach: true, waitForDebuggerOnStart: false, flatten: true },
+        sessionId,
+      ).catch(() => {}),
+      send('Runtime.enable', {}, sessionId).catch(() => {}),
+    ]);
     following.add(followed);
     return followed;
   };
@@ -199,6 +202,7 @@ export async function openDevtools(
       sessionId?: string;
       params?: {
         sessionId?: string;
+        executionContextId?: number;
         name?: string;
         payload?: string;
         targetInfo?: { type?: string };
@@ -209,6 +213,15 @@ export async function openDevtools(
       pending.delete(message.id!);
       if (message.error) waiter.reject(new Error(message.error.message ?? 'Inspector error.'));
       else waiter.resolve(message.result ?? {});
+    } else if (
+      message.method === 'Runtime.executionContextDestroyed' &&
+      message.params?.executionContextId !== undefined
+    ) {
+      for (const [key, id] of worlds)
+        if (id === message.params.executionContextId) worlds.delete(key);
+    } else if (message.method === 'Runtime.executionContextsCleared' && message.sessionId) {
+      for (const key of worlds.keys())
+        if (key.startsWith(`${message.sessionId}:`)) worlds.delete(key);
     } else if (message.method === 'Runtime.bindingCalled' && message.params?.name) {
       bindings.get(message.params.name)?.(message.params.payload ?? '');
     } else if (
@@ -256,10 +269,8 @@ export async function openDevtools(
     walk((await send('Page.getFrameTree', {}, session)).frameTree as FrameNode);
     return frames;
   };
-  const world = async (session: string, frameId: string) => {
+  const createWorld = async (session: string, frameId: string) => {
     const key = `${session}:${frameId}`;
-    const known = worlds.get(key);
-    if (known !== undefined) return known;
     const { executionContextId } = (await send(
       'Page.createIsolatedWorld',
       { frameId, worldName: 'nod-private' },
@@ -268,14 +279,44 @@ export async function openDevtools(
     worlds.set(key, executionContextId);
     return executionContextId;
   };
-  const evaluate = async (session: string, context: number, expression: string) => {
-    const { result, exceptionDetails } = (await send(
-      'Runtime.evaluate',
-      { contextId: context, expression, returnByValue: true },
-      session,
-    )) as { result?: { value?: unknown }; exceptionDetails?: unknown };
-    if (exceptionDetails) throw new Error('The page check failed.');
-    return result?.value;
+  const world = async (session: string, frameId: string) => {
+    const key = `${session}:${frameId}`;
+    const known = worlds.get(key);
+    if (known !== undefined) return known;
+    return createWorld(session, frameId);
+  };
+  const evaluate = async (
+    session: string,
+    context: number,
+    expression: string,
+    frameId?: string,
+  ) => {
+    let response: { result?: { value?: unknown }; exceptionDetails?: unknown };
+    try {
+      response = (await send(
+        'Runtime.evaluate',
+        { contextId: context, expression, returnByValue: true },
+        session,
+      )) as { result?: { value?: unknown }; exceptionDetails?: unknown };
+    } catch (error) {
+      if (
+        frameId &&
+        error instanceof Error &&
+        /Cannot find context with specified id/i.test(error.message)
+      ) {
+        worlds.delete(`${session}:${frameId}`);
+        const fresh = await createWorld(session, frameId);
+        response = (await send(
+          'Runtime.evaluate',
+          { contextId: fresh, expression, returnByValue: true },
+          session,
+        )) as { result?: { value?: unknown }; exceptionDetails?: unknown };
+      } else {
+        throw error;
+      }
+    }
+    if (response.exceptionDetails) throw new Error('The page check failed.');
+    return response.result?.value;
   };
 
   async function everyFrame(
@@ -348,13 +389,13 @@ export async function openDevtools(
               );
               if (exceptionDetails) throw new Error('The page check failed.');
             } else if (shadows === 'document')
-              await evaluate(session, context, 'globalThis.__nodRoots = [];');
+              await evaluate(session, context, 'globalThis.__nodRoots = [];', frame.id);
           }
           results.push({
             origin: frame.securityOrigin ?? '',
             session,
             context,
-            value: await evaluate(session, context, expression),
+            value: await evaluate(session, context, expression, frame.id),
           });
         } catch (error) {
           worlds.delete(`${session}:${frame.id}`);
@@ -1203,6 +1244,9 @@ export async function openDevtools(
         if (main?.loaderId === loaderId) return true;
       }
       return false;
+    },
+    open() {
+      return socket.readyState === WebSocket.OPEN;
     },
     close() {
       socket.close();

@@ -7,6 +7,7 @@ export function runBrowserBridge(options: {
   input: Readable;
   output: Writable;
   socketPath?: string;
+  multiplex?: boolean;
 }): Promise<number> {
   return new Promise((resolve) => {
     const socket = connect(options.socketPath ?? browserSocketPath);
@@ -16,6 +17,8 @@ export function runBrowserBridge(options: {
     let requestId: string | undefined;
     let cancelled = false;
     let ended = false;
+    const multiplex = options.multiplex === true;
+    if (multiplex) socket.write(JSON.stringify({ type: 'multiplex' }) + '\n');
     const finish = (code: number) => {
       if (ended) return;
       ended = true;
@@ -27,7 +30,7 @@ export function runBrowserBridge(options: {
       socket.destroy();
       resolve(code);
     };
-    const disconnected = () => finish(1);
+    const disconnected = () => finish(multiplex ? 0 : 1);
     const incoming = (chunk: Buffer | string) => {
       input += chunk.toString();
       for (let line = input.indexOf('\n'); line >= 0; line = input.indexOf('\n')) {
@@ -35,12 +38,15 @@ export function runBrowserBridge(options: {
         input = input.slice(line + 1);
         try {
           const frame = browserFrame.parse(JSON.parse(raw));
-          if (frame.type === 'request') {
-            if (requestId) return finish(1);
-            requestId = frame.request.id;
-          } else {
-            if (!requestId || cancelled || frame.id !== requestId) return finish(1);
-            if (frame.type === 'cancel') cancelled = true;
+          if (!multiplex) {
+            if (frame.type === 'multiplex') return finish(1);
+            if (frame.type === 'request') {
+              if (requestId) return finish(1);
+              requestId = frame.request.id;
+            } else {
+              if (!requestId || cancelled || frame.id !== requestId) return finish(1);
+              if (frame.type === 'cancel') cancelled = true;
+            }
           }
           if (!socket.write(JSON.stringify(frame) + '\n')) {
             options.input.pause();
@@ -69,6 +75,10 @@ export function runBrowserBridge(options: {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  process.exitCode = await runBrowserBridge({ input: process.stdin, output: process.stdout });
+  process.exitCode = await runBrowserBridge({
+    input: process.stdin,
+    output: process.stdout,
+    multiplex: process.argv.includes('--multiplex'),
+  });
   process.stdin.destroy();
 }
