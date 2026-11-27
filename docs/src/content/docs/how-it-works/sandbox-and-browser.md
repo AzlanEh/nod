@@ -99,7 +99,7 @@ The CLI then runs with an environment built from scratch: a fixed `PATH`, a priv
 
 ## The browser container
 
-The browser is a separate trusted container. It doesn't share mounts or a network namespace with the workspace. The server drives Vercel Labs [agent-browser](https://github.com/vercel-labs/agent-browser) over a persistent multiplexed stdin bridge to a private Unix socket, with per-session cached DevTools connections.
+The browser is a separate trusted container. It doesn't share mounts or a network namespace with the workspace. The server drives Vercel Labs [agent-browser](https://github.com/vercel-labs/agent-browser) over a persistent multiplexed stdin bridge to a private Unix socket.
 
 | Setting    | Value                                                                   |
 | ---------- | ----------------------------------------------------------------------- |

@@ -65,20 +65,6 @@ interface BrowserState {
   root?: string;
   browser?: string;
   targetId?: string;
-  devtools?: {
-    cdpUrl: string;
-    targetId: string;
-    client: Awaited<ReturnType<typeof openDevtools>>;
-    refs: number;
-    retired: boolean;
-  };
-  devtoolsOpening?: Promise<{
-    cdpUrl: string;
-    targetId: string;
-    client: Awaited<ReturnType<typeof openDevtools>>;
-    refs: number;
-    retired: boolean;
-  }>;
   seenTabs: Set<string>;
   started: boolean;
   busy: number;
@@ -455,17 +441,7 @@ export function createAgentBrowserComputer(options: {
       : ownerCommand(['tab', 'close', tab]).then(() => ({}));
   }
 
-  function dropInspector(state: BrowserState) {
-    const cached = state.devtools;
-    delete state.devtools;
-    delete state.devtoolsOpening;
-    if (!cached) return;
-    cached.retired = true;
-    if (cached.refs <= 0) cached.client.close();
-  }
-
   function forgetTabs(state: BrowserState) {
-    dropInspector(state);
     delete state.root;
     delete state.targetId;
     state.seenTabs.clear();
@@ -481,7 +457,6 @@ export function createAgentBrowserComputer(options: {
       (state.targetId && tabs.includes(state.targetId) ? state.targetId : tabs.at(-1));
     if (!next || next === state.targetId) return;
     await requestDaemon(state.socket, { action: 'tab_switch', tabId: next }, signal);
-    dropInspector(state);
     state.targetId = next;
   }
 
@@ -1749,78 +1724,16 @@ export function createAgentBrowserComputer(options: {
   }
 
   async function inspector(state: BrowserState, signal?: AbortSignal) {
-    const lease = (entry: NonNullable<BrowserState['devtools']>) => {
-      entry.refs++;
-      let released = false;
-      return Object.assign(Object.create(entry.client), {
-        close() {
-          if (released) return;
-          released = true;
-          entry.refs--;
-          if (entry.retired && entry.refs <= 0) entry.client.close();
-        },
-      }) as Awaited<ReturnType<typeof openDevtools>>;
-    };
-    const matches = (entry: NonNullable<BrowserState['devtools']>) =>
-      !entry.retired &&
-      entry.client.open() &&
-      (!owner.cdpUrl || entry.cdpUrl === owner.cdpUrl) &&
-      (!state.targetId || entry.targetId === state.targetId);
-
-    if (!signal) {
-      if (state.devtools && matches(state.devtools)) return lease(state.devtools);
-      if (state.devtoolsOpening) {
-        const opening = await state.devtoolsOpening.catch(() => undefined);
-        if (opening && matches(opening)) return lease(opening);
-      }
-      dropInspector(state);
-      const opening = (async () => {
-        const { cdpUrl } = z
-          .object({ cdpUrl: z.string() })
-          .passthrough()
-          .parse(await command(state, { action: 'cdp_url' }));
-        let targetId = state.targetId;
-        if (!targetId) {
-          const tabs = z
-            .array(z.object({ active: z.boolean(), targetId: z.string() }).passthrough())
-            .parse((await command(state, { action: 'tab_list' })).tabs);
-          const tab = tabs.find((item) => item.active);
-          if (!tab) throw new Error('The checkout tab is no longer open.');
-          targetId = tab.targetId;
-        }
-        const client = await openDevtools(cdpUrl, targetId, undefined, options.clickReceiptMs);
-        return { cdpUrl, targetId, client, refs: 0, retired: false };
-      })();
-      state.devtoolsOpening = opening;
-      try {
-        const entry = await opening;
-        if (state.devtoolsOpening === opening) {
-          delete state.devtoolsOpening;
-          state.devtools = entry;
-          return lease(entry);
-        }
-        entry.retired = true;
-        return lease(entry);
-      } catch (error) {
-        if (state.devtoolsOpening === opening) delete state.devtoolsOpening;
-        throw error;
-      }
-    }
-
     const { cdpUrl } = z
       .object({ cdpUrl: z.string() })
       .passthrough()
       .parse(await command(state, { action: 'cdp_url' }, { signal }));
-    let targetId = state.targetId;
-    if (!targetId) {
-      const tabs = z
-        .array(z.object({ active: z.boolean(), targetId: z.string() }).passthrough())
-        .parse((await command(state, { action: 'tab_list' }, { signal })).tabs);
-      const tab = tabs.find((item) => item.active);
-      if (!tab) throw new Error('The checkout tab is no longer open.');
-      targetId = tab.targetId;
-    }
-    return openDevtools(cdpUrl, targetId, signal, options.clickReceiptMs);
+    const tabs = z
+      .array(z.object({ active: z.boolean(), targetId: z.string() }).passthrough())
+      .parse((await command(state, { action: 'tab_list' }, { signal })).tabs);
+    const tab = tabs.find((item) => item.active);
+    if (!tab) throw new Error('The checkout tab is no longer open.');
+    return openDevtools(cdpUrl, tab.targetId, signal, options.clickReceiptMs);
   }
 
   async function focusField(

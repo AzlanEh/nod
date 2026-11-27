@@ -1,4 +1,5 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawn, type ChildProcessByStdio } from 'node:child_process';
+import type { Readable, Writable } from 'node:stream';
 import {
   BrowserActionError,
   type BrowserAction,
@@ -90,8 +91,8 @@ if (dns.promises) {
 Object.defineProperty(globalThis, 'fetch', { value: undefined, writable: false, configurable: false });
 Object.defineProperty(globalThis, 'WebSocket', { value: undefined, writable: false, configurable: false });
 
-const send = (msg) => {
-  process.stdout.write(JSON.stringify(msg) + '\\n');
+const send = (msg, done) => {
+  process.stdout.write(JSON.stringify(msg) + '\\n', done);
 };
 
 let nextId = 1;
@@ -263,6 +264,7 @@ bridge(
 );
 
 async function runScript(code) {
+  let payload;
   try {
     const script = new Script('(async () => {\\n' + code + '\\n})()', {
       filename: 'browser_run.js',
@@ -270,14 +272,15 @@ async function runScript(code) {
     const value = await script.runInContext(context);
     const hasResult = value !== undefined;
     const result = hasResult ? safeSerialize(value) : '';
-    send({ type: 'done', result, hasResult, logs });
+    payload = { type: 'done', result, hasResult, logs };
   } catch (error) {
     const message = error && typeof error.message === 'string' ? error.message : safeSerialize(error);
-    send({ type: 'error', message, logs });
-  } finally {
-    rl.close();
-    process.exit(0);
+    payload = { type: 'error', message, logs };
   }
+  rl.close();
+  send(payload, () => {
+    process.exit(0);
+  });
 }
 `;
 
@@ -474,6 +477,10 @@ export async function runBrowserScript(
   handlers.signal.addEventListener('abort', onOuterAbort, { once: true });
 
   const actions: string[] = [];
+  const env: NodeJS.ProcessEnv = {
+    ELECTRON_RUN_AS_NODE: '1',
+    ...(process.platform === 'win32' ? { SystemRoot: 'C:\\Windows' } : {}),
+  };
   let reserved = 0;
   let lastPage: BrowserObservation | undefined;
   let lastObservedText = '';
@@ -613,14 +620,14 @@ export async function runBrowserScript(
   let logs: string[] = [];
   let serialized = '';
   let hasResult = false;
-  let child: ChildProcessWithoutNullStreams | undefined;
+  let child: ChildProcessByStdio<Writable, Readable, null> | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let runFailure:
     | { kind: 'timeout' }
     | { kind: 'abort'; reason: unknown }
     | { kind: 'script'; message: string }
     | { kind: 'worker'; error: unknown }
-    | { kind: 'exit'; exitCode: number }
+    | { kind: 'exit'; exitCode: number | null; signal: NodeJS.Signals | null }
     | undefined;
 
   const terminateChild = () => {
@@ -669,7 +676,7 @@ export async function runBrowserScript(
           '-e',
           sandboxSource,
         ],
-        { env: {}, stdio: ['pipe', 'pipe', 'pipe'] },
+        { env, stdio: ['pipe', 'pipe', 'ignore'] },
       );
 
       const sendToChild = (msg: Record<string, unknown>) => {
@@ -739,13 +746,14 @@ export async function runBrowserScript(
         finish();
       });
 
-      child.on('exit', (exitCode) => {
+      child.on('close', (exitCode, exitSignal) => {
         if (settled) return;
         if (!paused) {
           if (timedOut) runFailure ??= { kind: 'timeout' };
-          else runFailure ??= { kind: 'exit', exitCode: exitCode ?? 1 };
+          else runFailure ??= { kind: 'exit', exitCode, signal: exitSignal };
+          const detail = exitSignal ? `signal ${exitSignal}` : `exit code ${exitCode ?? 'unknown'}`;
           if (!controller.signal.aborted)
-            controller.abort(new Error(`browser_run exited unexpectedly (${exitCode ?? 1}).`));
+            controller.abort(new Error(`browser_run exited unexpectedly (${detail}).`));
         }
         finish();
       });
@@ -790,7 +798,10 @@ export async function runBrowserScript(
         ? runFailure.error
         : new Error(withActionSummary(String(runFailure.error)));
     }
-    throw new Error(withActionSummary(`browser_run exited unexpectedly (${runFailure.exitCode}).`));
+    const detail = runFailure.signal
+      ? `signal ${runFailure.signal}`
+      : `exit code ${runFailure.exitCode ?? 'unknown'}`;
+    throw new Error(withActionSummary(`browser_run exited unexpectedly (${detail}).`));
   }
 
   handlers.signal.throwIfAborted();

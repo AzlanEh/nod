@@ -2635,7 +2635,7 @@ test('browser_run executes multi-step scripts with isolation, Trust checks, diff
       await assert.rejects(
         call(tools, 'browser_run', {
           code: `
-            page.scroll('down');
+            page.fill('#slow-before-throw', 'y');
             page.fill('#queued-after-throw', 'x');
             throw new Error('Synthetic script throw');
           `,
@@ -2685,12 +2685,25 @@ test('browser_run executes multi-step scripts with isolation, Trust checks, diff
           url,
           controls: [{ role: 'button', name: 'Go' }],
         }),
-        act: async (_id, step) => {
+        act: async (_id, step, signal) => {
           acted.push({
             action: step.action,
             target: step.selector ?? step.url ?? step.script ?? '',
             observe: step.observe,
           });
+          if (step.selector === '#slow-before-throw') {
+            await new Promise<void>((resolve, reject) => {
+              const timer = setTimeout(resolve, 200);
+              signal?.addEventListener(
+                'abort',
+                () => {
+                  clearTimeout(timer);
+                  reject(new DOMException('Aborted', 'AbortError'));
+                },
+                { once: true },
+              );
+            });
+          }
           if (step.selector === '#broken') throw new Error('Synthetic browser failure');
           if (step.action === 'open') url = step.url!;
           if (step.action === 'evaluate') return { url, text: 'Synthetic title' };

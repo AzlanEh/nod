@@ -61,6 +61,7 @@ export function createBridgeComputer(options: {
   available?(input: BrowserCall): boolean;
   timeoutMs?: number;
   drainTimeoutMs?: number;
+  readyTimeoutMs?: number;
 }): Computer & { quiesce(): Promise<boolean> } {
   let disposed = false;
   let uncertain = false;
@@ -144,7 +145,7 @@ export function createBridgeComputer(options: {
     ready.catch(() => {});
     const readyTimer = setTimeout(() => {
       if (persistent === channel && !channel.isReady) dropPersistent('ready_timeout');
-    }, options.drainTimeoutMs ?? 15_000);
+    }, options.readyTimeoutMs ?? 5_000);
     const channel = {
       child,
       entries: new Map<string, MultiplexEntry>(),
@@ -420,7 +421,7 @@ export function createBridgeComputer(options: {
           ) {
             settled = true;
             const proxyRefused = /403|forbidden|not allowed/i.test(channel.stderr);
-            if (proxyRefused) {
+            if (proxyRefused || reason === 'ready_timeout') {
               persistentDisabled = true;
               logFailure('browser_bridge_multiplex_fallback', new Error(channel.stderr || reason), {
                 method: input.method,
