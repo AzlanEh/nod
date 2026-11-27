@@ -564,7 +564,15 @@ export async function runBrowserScript(
           ? `Ran ${formatActionCount(actions.length)}: ${actions.join(', ')}. `
           : '';
         const status = current.started ? 'failed and may have taken effect' : 'did not run';
-        const detail = `${ran}Action ${index + 1} (${step.action}) ${status}. ${message}`;
+        const staleRefHint =
+          error instanceof BrowserActionError &&
+          error.code === 'browser_target_changed' &&
+          actions.some((a) =>
+            ['open', 'back', 'forward', 'reload', 'click', 'tab_switch'].includes(a),
+          )
+            ? ' Refs from before navigation or page change are stale; call await page.snapshot() after open/back/click before using @eN refs.'
+            : '';
+        const detail = `${ran}Action ${index + 1} (${step.action}) ${status}. ${message}${staleRefHint}`;
         if (error instanceof BrowserActionError) {
           throw new Error(detail, { cause: error });
         }
