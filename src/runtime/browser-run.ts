@@ -99,10 +99,30 @@ const context = createContext(Object.create(null), {
 });
 
 const bridge = new Script(\`
-(function(invokeJson, logLine) {
+(function(invokeJson, logJson) {
+  function safeString(value) {
+    if (value === undefined) return '';
+    if (typeof value === 'string') return value;
+    try {
+      const json = JSON.stringify(value, null, 2);
+      if (typeof json === 'string') return json;
+    } catch {}
+    try {
+      return String(value);
+    } catch {
+      return '[unserializable]';
+    }
+  }
   function call(method, args) {
     return new Promise(function(resolve, reject) {
-      invokeJson(method, JSON.stringify(args), function(err, raw) {
+      let serializedArgs;
+      try {
+        serializedArgs = JSON.stringify(args);
+      } catch (err) {
+        reject(new Error(safeString(err && err.message ? err.message : err)));
+        return;
+      }
+      invokeJson(String(method), serializedArgs, function(err, raw) {
         if (err) {
           reject(new Error(String(err)));
           return;
@@ -110,7 +130,7 @@ const bridge = new Script(\`
         try {
           resolve(raw === undefined ? undefined : JSON.parse(String(raw)));
         } catch (parseErr) {
-          reject(new Error(String(parseErr && parseErr.message ? parseErr.message : parseErr)));
+          reject(new Error(safeString(parseErr && parseErr.message ? parseErr.message : parseErr)));
         }
       });
     });
@@ -119,6 +139,11 @@ const bridge = new Script(\`
     var out = [];
     for (var i = 0; i < arguments.length; i++) out.push(arguments[i]);
     return out;
+  }
+  function formatLog() {
+    var parts = [];
+    for (var i = 0; i < arguments.length; i++) parts.push(safeString(arguments[i]));
+    return parts.join(' ').slice(0, 4000);
   }
   const methods = [
     'open', 'snapshot', 'click', 'fill', 'type', 'press', 'select',
@@ -135,9 +160,9 @@ const bridge = new Script(\`
   }
   Object.freeze(page);
   const consoleObj = Object.freeze({
-    log: function() { logLine(makeArgs.apply(null, arguments)); },
-    warn: function() { logLine(makeArgs.apply(null, arguments)); },
-    error: function() { logLine(makeArgs.apply(null, arguments)); },
+    log: function() { logJson(formatLog.apply(null, arguments)); },
+    warn: function() { logJson(formatLog.apply(null, arguments)); },
+    error: function() { logJson(formatLog.apply(null, arguments)); },
   });
   Object.defineProperty(globalThis, 'page', {
     value: page,
@@ -156,27 +181,37 @@ const bridge = new Script(\`
 
 bridge(
   (method, rawArgs, done) => {
-    let args = [];
     try {
-      args = JSON.parse(String(rawArgs));
-      if (!Array.isArray(args)) args = [];
+      let args = [];
+      try {
+        args = JSON.parse(typeof rawArgs === 'string' ? rawArgs : '[]');
+        if (!Array.isArray(args)) args = [];
+      } catch {
+        args = [];
+      }
+      invoke(typeof method === 'string' ? method : '', args).then(
+        (val) => {
+          try {
+            done(null, val === undefined ? undefined : JSON.stringify(val));
+          } catch {}
+        },
+        (err) => {
+          try {
+            done(err && typeof err.message === 'string' ? err.message : 'Browser action failed.');
+          } catch {}
+        },
+      );
     } catch {
-      args = [];
+      try {
+        done('Browser action failed.');
+      } catch {}
     }
-    invoke(String(method), args).then(
-      (val) => {
-        done(null, val === undefined ? undefined : JSON.stringify(val));
-      },
-      (err) => {
-        done(err && typeof err.message === 'string' ? err.message : String(err));
-      },
-    );
   },
-  (args) => {
-    if (logs.length >= maxLogs) return;
-    const parts = [];
-    for (let i = 0; i < args.length; i++) parts.push(serialize(args[i]));
-    logs.push(parts.join(' ').slice(0, 4000));
+  (line) => {
+    try {
+      if (logs.length >= maxLogs) return;
+      if (typeof line === 'string') logs.push(line.slice(0, 4000));
+    } catch {}
   },
 );
 
@@ -523,6 +558,13 @@ export async function runBrowserScript(
   let hasResult = false;
   let worker: Worker | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let runFailure:
+    | { kind: 'timeout' }
+    | { kind: 'abort'; reason: unknown }
+    | { kind: 'script'; message: string }
+    | { kind: 'worker'; error: unknown }
+    | { kind: 'exit'; exitCode: number }
+    | undefined;
 
   const terminateWorker = async () => {
     const current = worker;
@@ -532,33 +574,23 @@ export async function runBrowserScript(
   };
 
   try {
-    await new Promise<void>((resolve, reject) => {
+    await new Promise<void>((resolve) => {
       let settled = false;
-      const finish = (fn: () => void) => {
+      const finish = () => {
         if (settled) return;
         settled = true;
         if (timer) clearTimeout(timer);
         controller.signal.removeEventListener('abort', onAbort);
-        fn();
+        resolve();
       };
 
       const onAbort = () => {
         void terminateWorker();
-        finish(() => {
-          if (paused) resolve();
-          else if (timedOut)
-            reject(
-              new Error(
-                withActionSummary(`browser_run timed out after ${scriptTimeoutMs / 1000}s.`),
-              ),
-            );
-          else
-            reject(
-              controller.signal.reason instanceof Error
-                ? controller.signal.reason
-                : new Error(withActionSummary('Browser run aborted.')),
-            );
-        });
+        if (!paused) {
+          if (timedOut) runFailure ??= { kind: 'timeout' };
+          else runFailure ??= { kind: 'abort', reason: controller.signal.reason };
+        }
+        finish();
       };
 
       controller.signal.addEventListener('abort', onAbort, { once: true });
@@ -593,36 +625,32 @@ export async function runBrowserScript(
           logs = msg.logs;
           serialized = msg.result;
           hasResult = msg.hasResult;
-          finish(resolve);
+          finish();
           return;
         }
         if (msg.type === 'error') {
           logs = msg.logs;
-          const message =
-            msg.message.startsWith('Ran ') || msg.message.startsWith('Action ')
-              ? msg.message
-              : withActionSummary(msg.message);
-          finish(() => reject(new Error(message)));
+          runFailure ??= { kind: 'script', message: msg.message };
+          if (!controller.signal.aborted) controller.abort(new Error(msg.message));
+          finish();
         }
       });
 
       worker.on('error', (error) => {
-        finish(() => reject(error));
+        runFailure ??= { kind: 'worker', error };
+        if (!controller.signal.aborted) controller.abort(error);
+        finish();
       });
 
       worker.on('exit', (exitCode) => {
         if (settled) return;
-        finish(() => {
-          if (paused) resolve();
-          else if (timedOut)
-            reject(
-              new Error(
-                withActionSummary(`browser_run timed out after ${scriptTimeoutMs / 1000}s.`),
-              ),
-            );
-          else
-            reject(new Error(withActionSummary(`browser_run exited unexpectedly (${exitCode}).`)));
-        });
+        if (!paused) {
+          if (timedOut) runFailure ??= { kind: 'timeout' };
+          else runFailure ??= { kind: 'exit', exitCode };
+          if (!controller.signal.aborted)
+            controller.abort(new Error(`browser_run exited unexpectedly (${exitCode}).`));
+        }
+        finish();
       });
     });
   } finally {
@@ -641,6 +669,29 @@ export async function runBrowserScript(
       stopped: `Action ${pause.stepIndex + 1} (${pause.action}) and the code after it did not run.`,
       result: pause.output,
     };
+  }
+
+  if (runFailure) {
+    if (runFailure.kind === 'timeout') {
+      throw new Error(withActionSummary(`browser_run timed out after ${scriptTimeoutMs / 1000}s.`));
+    }
+    if (runFailure.kind === 'abort') {
+      if (runFailure.reason instanceof Error) throw runFailure.reason;
+      throw new Error(withActionSummary('Browser run aborted.'));
+    }
+    if (runFailure.kind === 'script') {
+      const message =
+        runFailure.message.startsWith('Ran ') || runFailure.message.startsWith('Action ')
+          ? runFailure.message
+          : withActionSummary(runFailure.message);
+      throw new Error(message);
+    }
+    if (runFailure.kind === 'worker') {
+      throw runFailure.error instanceof Error
+        ? runFailure.error
+        : new Error(withActionSummary(String(runFailure.error)));
+    }
+    throw new Error(withActionSummary(`browser_run exited unexpectedly (${runFailure.exitCode}).`));
   }
 
   handlers.signal.throwIfAborted();

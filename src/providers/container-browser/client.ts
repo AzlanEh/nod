@@ -424,12 +424,24 @@ export function createBridgeComputer(options: {
         function cancel() {
           if (settled || cancelling) return;
           cancelling = true;
-          if (written && !['currentPage', 'screenshot'].includes(input.method)) {
+          clearTimeout(timer);
+          if (!written) {
+            settled = true;
+            cleanup();
+            reject(
+              signal?.aborted
+                ? signal.reason instanceof Error
+                  ? signal.reason
+                  : new DOMException('Aborted', 'AbortError')
+                : new Error('The browser action timed out. Check the page before trying again.'),
+            );
+            return;
+          }
+          if (!['currentPage', 'screenshot'].includes(input.method)) {
             if (browserId) uncertainBrowsers.add(browserId);
             else uncertain = true;
           }
-          clearTimeout(timer);
-          if (written && !channel.closed) {
+          if (!channel.closed) {
             try {
               channel.child.stdin.write(JSON.stringify({ type: 'cancel', id: request.id }) + '\n');
             } catch {}

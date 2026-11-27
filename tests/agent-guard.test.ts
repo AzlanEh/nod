@@ -2601,6 +2601,27 @@ test('browser_run executes multi-step scripts with isolation, Trust checks, diff
         }),
         /Code generation from strings disallowed/,
       );
+      const cyclicLog = text(
+        await call(tools, 'browser_run', {
+          code: `
+            const x = Object.create(null);
+            x.self = x;
+            console.log(x);
+            return 'safe';
+          `,
+        }),
+      );
+      assert.match(cyclicLog, /safe/);
+      assert.match(cyclicLog, /\[unserializable\]/);
+      await assert.rejects(
+        call(tools, 'browser_run', {
+          code: `
+            page.fill('#queued-after-throw', 'x');
+            throw new Error('Synthetic script throw');
+          `,
+        }),
+        /Synthetic script throw/,
+      );
       await assert.rejects(
         call(tools, 'browser_run', {
           code: `
