@@ -2348,6 +2348,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
     };
   const replies: Array<{ id: string; text: string; source: string }> = [];
   let replyCommitted = false;
+  let taskStarted = false;
   let explicitAudio = false;
   const published = new Map<string, Artifact>();
   let sourceMessageId: string | null = null;
@@ -2914,7 +2915,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
             prior?.handoff,
             sourcePrompt,
           ).then((res) => {
-            if (input.action === 'start') replyCommitted = true;
+            if (input.action === 'start') taskStarted = true;
             return res;
           });
         }),
@@ -3230,6 +3231,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
       const retryableReadOnly =
         (failure === 'offline' || failure === 'model') &&
         !replyCommitted &&
+        !taskStarted &&
         ownerMessageIds.length <= 1 &&
         !(error instanceof ContextLimitError) &&
         !(error instanceof OutputLimitError) &&
